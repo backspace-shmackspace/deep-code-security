@@ -156,6 +156,10 @@ class HunterOrchestrator:
                 )
                 all_findings.append(finding)
 
+        # Deduplicate: multiple sources flowing to the same sink are one vulnerability.
+        # Key on (file, sink_line, cwe) and keep the highest-confidence finding.
+        all_findings = _deduplicate_findings(all_findings)
+
         # Sort by severity (critical first) and confidence
         all_findings.sort(
             key=lambda f: (
@@ -283,6 +287,39 @@ def sink_finding_severity(category: str, registry: Registry) -> str:
     severities = [e.severity for e in sink_entries]
     order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
     return max(severities, key=lambda s: order.get(s, 0))
+
+
+def _deduplicate_findings(findings: list[RawFinding]) -> list[RawFinding]:
+    """Collapse findings that share the same sink into a single finding.
+
+    Multiple sources flowing to the same sink represent one vulnerability
+    (the fix is at the sink). We group by (file, sink_line, cwe) and keep
+    the finding with the highest confidence and most complete taint path.
+
+    Args:
+        findings: List of raw findings, possibly with duplicates.
+
+    Returns:
+        Deduplicated list of findings.
+    """
+    best: dict[tuple[str, int, str], RawFinding] = {}
+    for finding in findings:
+        key = (finding.sink.file, finding.sink.line, finding.sink.cwe)
+        existing = best.get(key)
+        if existing is None:
+            best[key] = finding
+        else:
+            # Prefer: higher confidence, then more taint steps (richer path)
+            new_better = (
+                finding.raw_confidence > existing.raw_confidence
+                or (
+                    finding.raw_confidence == existing.raw_confidence
+                    and len(finding.taint_path.steps) > len(existing.taint_path.steps)
+                )
+            )
+            if new_better:
+                best[key] = finding
+    return list(best.values())
 
 
 def _cwe_name(cwe: str) -> str:
