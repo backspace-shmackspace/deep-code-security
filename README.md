@@ -74,6 +74,20 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
+### Optional Environment Variables
+
+For advanced tuning, additional variables are available:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DCS_MAX_RESULTS` | `100` | Max findings returned per hunt operation |
+| `DCS_MAX_VERIFICATIONS` | `50` | Max findings to verify in auditor phase |
+| `DCS_SANDBOX_TIMEOUT` | `30` | Per-exploit timeout in seconds |
+| `DCS_MAX_FILES` | `10000` | Max files per scan |
+| `DCS_MAX_CONCURRENT_SANDBOXES` | `2` | Concurrency limit for sandbox execution |
+| `DCS_QUERY_TIMEOUT` | `5.0` | Tree-sitter query timeout in seconds |
+| `DCS_QUERY_MAX_RESULTS` | `1000` | Max results per tree-sitter query |
+
 ## MCP Tools
 
 | Tool | Description |
