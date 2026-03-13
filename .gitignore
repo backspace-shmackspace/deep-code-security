@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-link
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+nosetests.xml
+test-results/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# Linting
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+*.whl
+*.tar.gz
+
+# Sandbox artifacts
+sandbox/*.log
+sandbox/tmp/
+sandbox/artifacts/
+
+# Exploit artifacts (never commit)
+*.poc
+*.exploit
+exploit_*.py
+poc_*.py
+
+# Credentials (safety net)
+*.pem
+*.key
+*.crt
+*.p12
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Tree-sitter compiled grammars
+*.so
+parser.c

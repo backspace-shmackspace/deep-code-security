@@ -1,0 +1,108 @@
+.PHONY: lint test test-hunter test-auditor test-architect test-mcp test-integration \
+        sast security build build-sandboxes clean check-vendor install install-dev
+
+PYTHON := python3
+PYTEST := pytest
+RUFF := ruff
+BANDIT := bandit
+SRC := src/deep_code_security
+TESTS := tests
+
+# Install production dependencies
+install:
+	$(PYTHON) -m pip install -e .
+
+# Install development dependencies
+install-dev:
+	$(PYTHON) -m pip install -e ".[dev]"
+
+# Lint with ruff
+lint:
+	$(RUFF) check $(SRC) $(TESTS)
+	$(RUFF) format --check $(SRC) $(TESTS)
+
+# Format code
+format:
+	$(RUFF) format $(SRC) $(TESTS)
+	$(RUFF) check --fix $(SRC) $(TESTS)
+
+# Run all tests with coverage
+test:
+	$(PYTEST) $(TESTS) -v \
+		--cov=$(SRC) \
+		--cov-report=term-missing \
+		--cov-fail-under=90 \
+		--ignore=$(TESTS)/test_integration
+
+# Run hunter tests
+test-hunter:
+	$(PYTEST) $(TESTS)/test_hunter -v \
+		--cov=$(SRC)/hunter \
+		--cov-report=term-missing
+
+# Run auditor tests
+test-auditor:
+	$(PYTEST) $(TESTS)/test_auditor -v \
+		--cov=$(SRC)/auditor \
+		--cov-report=term-missing
+
+# Run architect tests
+test-architect:
+	$(PYTEST) $(TESTS)/test_architect -v \
+		--cov=$(SRC)/architect \
+		--cov-report=term-missing
+
+# Run MCP tests
+test-mcp:
+	$(PYTEST) $(TESTS)/test_mcp -v \
+		--cov=$(SRC)/mcp \
+		--cov-report=term-missing
+
+# Run integration tests (requires Docker or Podman)
+test-integration:
+	$(PYTEST) $(TESTS)/test_integration -v --timeout=120
+
+# Static security analysis
+sast:
+	$(BANDIT) -r $(SRC) -ll
+
+# Security audit (sast + dependency audit)
+security: sast
+	pip-audit
+
+# Build sandbox Docker images
+build-sandboxes:
+	@echo "Building Python sandbox image..."
+	docker build -f sandbox/Dockerfile.python -t deep-code-security-sandbox-python:latest sandbox/
+	@echo "Building Go sandbox image..."
+	docker build -f sandbox/Dockerfile.go -t deep-code-security-sandbox-go:latest sandbox/
+	@echo "Building C sandbox image..."
+	docker build -f sandbox/Dockerfile.c -t deep-code-security-sandbox-c:latest sandbox/
+
+# Check vendored shared library against upstream
+check-vendor:
+	@echo "Checking vendored shared library..."
+	@if [ -f $(SRC)/mcp/shared/VENDORED_FROM.md ]; then \
+		echo "VENDORED_FROM.md found. Check manually against upstream helper-mcps."; \
+	else \
+		echo "WARNING: VENDORED_FROM.md not found in $(SRC)/mcp/shared/"; \
+		exit 1; \
+	fi
+
+# Build Python package
+build:
+	$(PYTHON) -m build
+
+# Clean build artifacts
+clean:
+	rm -rf dist/ build/ *.egg-info src/*.egg-info
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete
+	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
+	find . -name ".coverage" -delete
+	find . -name "coverage.xml" -delete
+
+# Run MCP server (for development)
+serve:
+	$(PYTHON) -m deep_code_security.mcp

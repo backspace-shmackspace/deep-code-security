@@ -1,0 +1,120 @@
+language: c
+version: "1.0.0"
+
+# C registry — Stretch goal for v1
+#
+# Known Limitations:
+# - argv indexing patterns vary (argv[1], *(argv+1), etc.) -- only direct access matched
+# - Pointer aliasing (char *p = argv[1]; use(p)) -- NOT tracked across variables in v1
+# - Function pointers for sinks -- NOT matched
+# - Struct member injection patterns -- NOT matched
+
+sources:
+  cli_input:
+    - pattern: "argv"
+      tree_sitter_query: |
+        (identifier) @source
+        (#eq? @source "argv")
+      severity: medium
+
+    - pattern: "scanf"
+      tree_sitter_query: |
+        (call_expression
+          function: (identifier) @fn
+          (#match? @fn "^(scanf|fscanf|sscanf)$")) @source
+      severity: high
+
+    - pattern: "gets"
+      tree_sitter_query: |
+        (call_expression
+          function: (identifier) @fn
+          (#eq? @fn "gets")) @source
+      severity: critical
+
+    - pattern: "fgets"
+      tree_sitter_query: |
+        (call_expression
+          function: (identifier) @fn
+          (#eq? @fn "fgets")) @source
+      severity: medium
+
+  env_input:
+    - pattern: "getenv"
+      tree_sitter_query: |
+        (call_expression
+          function: (identifier) @fn
+          (#eq? @fn "getenv")) @source
+      severity: low
+
+sinks:
+  command_injection:
+    cwe: "CWE-78"
+    entries:
+      - pattern: "system"
+        tree_sitter_query: |
+          (call_expression
+            function: (identifier) @fn
+            (#eq? @fn "system")) @sink
+        severity: critical
+
+      - pattern: "popen"
+        tree_sitter_query: |
+          (call_expression
+            function: (identifier) @fn
+            (#eq? @fn "popen")) @sink
+        severity: critical
+
+      - pattern: "execv"
+        tree_sitter_query: |
+          (call_expression
+            function: (identifier) @fn
+            (#match? @fn "^(execv|execl|execvp|execlp|execve|execle)$")) @sink
+        severity: critical
+
+  buffer_overflow:
+    cwe: "CWE-120"
+    entries:
+      - pattern: "strcpy"
+        tree_sitter_query: |
+          (call_expression
+            function: (identifier) @fn
+            (#match? @fn "^(strcpy|strcat|wcscpy|wcscat)$")) @sink
+        severity: high
+
+      - pattern: "sprintf"
+        tree_sitter_query: |
+          (call_expression
+            function: (identifier) @fn
+            (#match? @fn "^(sprintf|vsprintf)$")) @sink
+        severity: high
+
+  format_string:
+    cwe: "CWE-134"
+    entries:
+      - pattern: "printf"
+        tree_sitter_query: |
+          (call_expression
+            function: (identifier) @fn
+            (#match? @fn "^(printf|fprintf|syslog)$")) @sink
+        severity: high
+
+  path_traversal:
+    cwe: "CWE-22"
+    entries:
+      - pattern: "fopen"
+        tree_sitter_query: |
+          (call_expression
+            function: (identifier) @fn
+            (#match? @fn "^(fopen|open)$")) @sink
+        severity: high
+
+sanitizers:
+  - pattern: "snprintf"
+    neutralizes:
+      - buffer_overflow
+    description: "Bounded copy function — use instead of sprintf/strcpy"
+
+  - pattern: "strncpy"
+    neutralizes:
+      - buffer_overflow
+    description: "Bounded string copy — partial mitigation only (null termination risk)"

@@ -1,0 +1,201 @@
+language: python
+version: "1.0.0"
+
+# Known Limitations (v1):
+# - Aliased imports (req = request; req.form) -- NOT matched
+# - Fully qualified (flask.request.form) -- NOT matched
+# - Class attribute (self.request.form) -- NOT matched
+# - Chained calls (request.form.get("key")) -- partial match only
+# These gaps are documented and expected. See Known Limitations in README.
+
+sources:
+  web_input:
+    - pattern: "request.form"
+      tree_sitter_query: |
+        (attribute
+          object: (identifier) @obj
+          attribute: (identifier) @attr
+          (#eq? @obj "request")
+          (#eq? @attr "form")) @source
+      severity: high
+
+    - pattern: "request.args"
+      tree_sitter_query: |
+        (attribute
+          object: (identifier) @obj
+          attribute: (identifier) @attr
+          (#eq? @obj "request")
+          (#eq? @attr "args")) @source
+      severity: high
+
+    - pattern: "request.json"
+      tree_sitter_query: |
+        (attribute
+          object: (identifier) @obj
+          attribute: (identifier) @attr
+          (#eq? @obj "request")
+          (#eq? @attr "json")) @source
+      severity: high
+
+    - pattern: "request.data"
+      tree_sitter_query: |
+        (attribute
+          object: (identifier) @obj
+          attribute: (identifier) @attr
+          (#eq? @obj "request")
+          (#eq? @attr "data")) @source
+      severity: medium
+
+    - pattern: "request.values"
+      tree_sitter_query: |
+        (attribute
+          object: (identifier) @obj
+          attribute: (identifier) @attr
+          (#eq? @obj "request")
+          (#eq? @attr "values")) @source
+      severity: high
+
+  cli_input:
+    - pattern: "sys.argv"
+      tree_sitter_query: |
+        (attribute
+          object: (identifier) @obj
+          attribute: (identifier) @attr
+          (#eq? @obj "sys")
+          (#eq? @attr "argv")) @source
+      severity: medium
+
+    - pattern: "input()"
+      tree_sitter_query: |
+        (call
+          function: (identifier) @fn
+          (#eq? @fn "input")) @source
+      severity: medium
+
+  env_input:
+    - pattern: "os.environ"
+      tree_sitter_query: |
+        (attribute
+          object: (identifier) @obj
+          attribute: (identifier) @attr
+          (#eq? @obj "os")
+          (#eq? @attr "environ")) @source
+      severity: low
+
+sinks:
+  command_injection:
+    cwe: "CWE-78"
+    entries:
+      - pattern: "os.system"
+        tree_sitter_query: |
+          (call
+            function: (attribute
+              object: (identifier) @obj
+              attribute: (identifier) @attr
+              (#eq? @obj "os")
+              (#eq? @attr "system"))) @sink
+        severity: critical
+
+      - pattern: "subprocess.call"
+        tree_sitter_query: |
+          (call
+            function: (attribute
+              object: (identifier) @obj
+              attribute: (identifier) @attr
+              (#eq? @obj "subprocess")
+              (#match? @attr "^(call|run|Popen|check_output|check_call)$"))) @sink
+        severity: critical
+
+      - pattern: "os.popen"
+        tree_sitter_query: |
+          (call
+            function: (attribute
+              object: (identifier) @obj
+              attribute: (identifier) @attr
+              (#eq? @obj "os")
+              (#eq? @attr "popen"))) @sink
+        severity: critical
+
+  sql_injection:
+    cwe: "CWE-89"
+    entries:
+      - pattern: "cursor.execute"
+        tree_sitter_query: |
+          (call
+            function: (attribute
+              attribute: (identifier) @attr
+              (#eq? @attr "execute"))
+            arguments: (argument_list
+              (binary_operator) @arg)) @sink
+        severity: critical
+
+      - pattern: "cursor.executemany"
+        tree_sitter_query: |
+          (call
+            function: (attribute
+              attribute: (identifier) @attr
+              (#eq? @attr "executemany"))
+            arguments: (argument_list
+              (binary_operator) @arg)) @sink
+        severity: critical
+
+  code_execution:
+    cwe: "CWE-94"
+    entries:
+      - pattern: "eval"
+        tree_sitter_query: |
+          (call
+            function: (identifier) @fn
+            (#eq? @fn "eval")) @sink
+        severity: critical
+
+      - pattern: "exec"
+        tree_sitter_query: |
+          (call
+            function: (identifier) @fn
+            (#eq? @fn "exec")) @sink
+        severity: critical
+
+      - pattern: "compile"
+        tree_sitter_query: |
+          (call
+            function: (identifier) @fn
+            (#eq? @fn "compile")) @sink
+        severity: high
+
+  path_traversal:
+    cwe: "CWE-22"
+    entries:
+      - pattern: "open"
+        tree_sitter_query: |
+          (call
+            function: (identifier) @fn
+            (#eq? @fn "open")
+            arguments: (argument_list)) @sink
+        severity: high
+
+sanitizers:
+  - pattern: "shlex.quote"
+    neutralizes:
+      - command_injection
+    description: "Properly escapes shell metacharacters"
+
+  - pattern: "shlex.split"
+    neutralizes:
+      - command_injection
+    description: "Splits command into safe list form"
+
+  - pattern: "html.escape"
+    neutralizes:
+      - xss
+    description: "Escapes HTML special characters"
+
+  - pattern: "parameterized"
+    neutralizes:
+      - sql_injection
+    description: "Using ? or %s placeholders with separate args tuple"
+
+  - pattern: "os.path.abspath"
+    neutralizes:
+      - path_traversal
+    description: "Resolves absolute path, partial mitigation only"

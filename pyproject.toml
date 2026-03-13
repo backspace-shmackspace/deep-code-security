@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deep-code-security"
+version = "1.0.0"
+description = "Multi-language SAST tool with agentic verification via tree-sitter, sandbox exploit testing, and MCP interface"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "deep-code-security contributors" }]
+keywords = ["sast", "security", "static-analysis", "tree-sitter", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+dependencies = [
+    "tree-sitter>=0.23.0,<0.24.0",
+    "tree-sitter-python>=0.23.0,<0.24.0",
+    "tree-sitter-go>=0.23.0,<0.24.0",
+    "tree-sitter-c>=0.23.0,<0.24.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "mcp>=1.26.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.1.0",
+    "pathspec>=0.12.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4.0",
+    "bandit[toml]>=1.7.0",
+    "pip-audit>=2.7.0",
+]
+
+[project.scripts]
+dcs = "deep_code_security.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deep_code_security = [
+    "hunter/queries/*.scm",
+    "auditor/seccomp-profile.json",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "S", "B", "A", "C4", "T20"]
+ignore = ["S101", "S603", "S607", "UP042"]  # Allow assert in tests, subprocess list form, str+Enum pattern
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "T20"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101", "B603", "B607"]  # Allow assert, subprocess list, partial paths in tests
+
+[tool.coverage.run]
+source = ["src/deep_code_security"]
+omit = [
+    "tests/*",
+    "*/mcp/shared/*",
+    # CLI and MCP entry-point are thin wrappers tested via integration
+    "*/cli.py",
+    "*/mcp/__main__.py",
+    # v1.1 stubs — no production logic
+    "*/hunter/call_graph.py",
+    "*/architect/impact_analyzer.py",
+]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true

@@ -1,0 +1,163 @@
+"""Auditor phase orchestration."""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import TYPE_CHECKING
+
+from deep_code_security.auditor.models import VerifiedFinding, VerifyStats
+from deep_code_security.auditor.sandbox import SandboxManager
+from deep_code_security.auditor.verifier import Verifier
+from deep_code_security.hunter.models import RawFinding
+from deep_code_security.shared.config import Config, get_config
+
+if TYPE_CHECKING:
+    pass
+
+__all__ = ["AuditorOrchestrator"]
+
+logger = logging.getLogger(__name__)
+
+# Severity order for prioritization
+_SEVERITY_ORDER: dict[str, int] = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
+
+
+class AuditorOrchestrator:
+    """Orchestrates the Auditor (Verification) phase."""
+
+    def __init__(
+        self,
+        config: Config | None = None,
+        sandbox: SandboxManager | None = None,
+    ) -> None:
+        self.config = config or get_config()
+        self.sandbox = sandbox or SandboxManager(
+            container_runtime=self.config.container_runtime,
+            max_concurrent=self.config.max_concurrent_sandboxes,
+            timeout_seconds=self.config.sandbox_timeout,
+        )
+        self.verifier = Verifier(sandbox=self.sandbox)
+        # Session store: verified_finding_id -> VerifiedFinding
+        self._session_verified: dict[str, VerifiedFinding] = {}
+
+    def verify(
+        self,
+        findings: list[RawFinding],
+        target_path: str,
+        sandbox_timeout: int | None = None,
+        max_verifications: int | None = None,
+    ) -> tuple[list[VerifiedFinding], VerifyStats]:
+        """Verify a list of raw findings.
+
+        Args:
+            findings: Raw findings to verify.
+            target_path: Path to the target codebase.
+            sandbox_timeout: Per-exploit timeout override.
+            max_verifications: Maximum number of findings to verify.
+
+        Returns:
+            Tuple of (verified_findings, stats).
+        """
+        start_ms = time.monotonic() * 1000
+        max_ver = max_verifications or self.config.max_verifications
+        timeout = sandbox_timeout or self.config.sandbox_timeout
+        sandbox_available = self.sandbox.is_available()
+
+        stats = VerifyStats(
+            total_findings=len(findings),
+            sandbox_available=sandbox_available,
+        )
+
+        # Sort by severity (critical first) for prioritization
+        sorted_findings = sorted(
+            findings,
+            key=lambda f: -_SEVERITY_ORDER.get(f.severity, 0),
+        )
+
+        # Split into verify set and skipped set
+        to_verify = sorted_findings[:max_ver]
+        skipped = sorted_findings[max_ver:]
+
+        stats.skipped_count = len(skipped)
+
+        verified: list[VerifiedFinding] = []
+
+        for finding in to_verify:
+            try:
+                vf = self.verifier.verify_finding(
+                    finding=finding,
+                    target_path=target_path,
+                    timeout=timeout,
+                )
+                verified.append(vf)
+                stats.verified_count += 1
+
+                # Count by status
+                if vf.verification_status == "confirmed":
+                    stats.confirmed += 1
+                elif vf.verification_status == "likely":
+                    stats.likely += 1
+                elif vf.verification_status == "unconfirmed":
+                    stats.unconfirmed += 1
+                else:
+                    stats.false_positives += 1
+
+                # Store in session
+                self._session_verified[vf.finding.id] = vf
+
+            except Exception as e:
+                logger.error(
+                    "Verification failed for finding %s: %s", finding.id, e
+                )
+                stats.skipped_count += 1
+
+        # Handle skipped findings with base confidence only
+        for finding in skipped:
+            from deep_code_security.auditor.confidence import compute_confidence
+            confidence, status = compute_confidence(finding, [])
+            vf = VerifiedFinding(
+                finding=finding,
+                exploit_results=[],
+                confidence_score=confidence,
+                verification_status=status,
+            )
+            verified.append(vf)
+            self._session_verified[vf.finding.id] = vf
+
+            if vf.verification_status == "confirmed":
+                stats.confirmed += 1
+            elif vf.verification_status == "likely":
+                stats.likely += 1
+            elif vf.verification_status == "unconfirmed":
+                stats.unconfirmed += 1
+            else:
+                stats.false_positives += 1
+
+        stats.verification_duration_ms = int(time.monotonic() * 1000 - start_ms)
+
+        logger.info(
+            "Auditor complete: %d verified, %d skipped, %dms",
+            stats.verified_count, stats.skipped_count, stats.verification_duration_ms,
+        )
+
+        return verified, stats
+
+    def get_verified_for_ids(self, finding_ids: list[str]) -> list[VerifiedFinding]:
+        """Retrieve verified findings from session store by finding ID.
+
+        Args:
+            finding_ids: Finding UUIDs from a previous verify run.
+
+        Returns:
+            List of matching VerifiedFinding instances.
+        """
+        return [
+            vf for fid, vf in self._session_verified.items()
+            if fid in finding_ids
+        ]

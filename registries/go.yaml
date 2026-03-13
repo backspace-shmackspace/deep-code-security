@@ -1,0 +1,163 @@
+language: go
+version: "1.0.0"
+
+# Known Limitations (v1):
+# - Variable aliasing (r2 := r; r2.FormValue("x")) -- NOT matched
+# - Method receivers with non-standard names -- partially matched
+# - Indirect request access through wrapper structs -- NOT matched
+# - Context-based request retrieval (e.g., ctx.Value(key)) -- NOT matched
+
+sources:
+  web_input:
+    - pattern: "r.FormValue"
+      tree_sitter_query: |
+        (call_expression
+          function: (selector_expression
+            operand: (identifier) @obj
+            field: (field_identifier) @attr
+            (#match? @obj "^r$|^req$|^request$")
+            (#eq? @attr "FormValue"))) @source
+      severity: high
+
+    - pattern: "r.URL.Query"
+      tree_sitter_query: |
+        (call_expression
+          function: (selector_expression
+            operand: (selector_expression
+              operand: (identifier) @obj
+              field: (field_identifier) @f1
+              (#match? @obj "^r$|^req$|^request$")
+              (#eq? @f1 "URL"))
+            field: (field_identifier) @attr
+            (#eq? @attr "Query"))) @source
+      severity: high
+
+    - pattern: "r.PostFormValue"
+      tree_sitter_query: |
+        (call_expression
+          function: (selector_expression
+            operand: (identifier) @obj
+            field: (field_identifier) @attr
+            (#match? @obj "^r$|^req$|^request$")
+            (#eq? @attr "PostFormValue"))) @source
+      severity: high
+
+    - pattern: "r.Header.Get"
+      tree_sitter_query: |
+        (call_expression
+          function: (selector_expression
+            operand: (selector_expression
+              operand: (identifier) @obj
+              field: (field_identifier) @f1
+              (#match? @obj "^r$|^req$|^request$")
+              (#eq? @f1 "Header"))
+            field: (field_identifier) @attr
+            (#eq? @attr "Get"))) @source
+      severity: medium
+
+  cli_input:
+    - pattern: "os.Args"
+      tree_sitter_query: |
+        (selector_expression
+          operand: (identifier) @obj
+          field: (field_identifier) @attr
+          (#eq? @obj "os")
+          (#eq? @attr "Args")) @source
+      severity: medium
+
+  env_input:
+    - pattern: "os.Getenv"
+      tree_sitter_query: |
+        (call_expression
+          function: (selector_expression
+            operand: (identifier) @obj
+            field: (field_identifier) @attr
+            (#eq? @obj "os")
+            (#eq? @attr "Getenv"))) @source
+      severity: low
+
+sinks:
+  command_injection:
+    cwe: "CWE-78"
+    entries:
+      - pattern: "exec.Command"
+        tree_sitter_query: |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @obj
+              field: (field_identifier) @attr
+              (#eq? @obj "exec")
+              (#eq? @attr "Command"))) @sink
+        severity: critical
+
+      - pattern: "exec.CommandContext"
+        tree_sitter_query: |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @obj
+              field: (field_identifier) @attr
+              (#eq? @obj "exec")
+              (#eq? @attr "CommandContext"))) @sink
+        severity: critical
+
+      - pattern: "syscall.Exec"
+        tree_sitter_query: |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @obj
+              field: (field_identifier) @attr
+              (#eq? @obj "syscall")
+              (#eq? @attr "Exec"))) @sink
+        severity: critical
+
+  sql_injection:
+    cwe: "CWE-89"
+    entries:
+      - pattern: "db.Query"
+        tree_sitter_query: |
+          (call_expression
+            function: (selector_expression
+              field: (field_identifier) @attr
+              (#match? @attr "^(Query|QueryRow|Exec|QueryContext|ExecContext)$"))
+            arguments: (argument_list
+              (binary_expression
+                operator: "+"))) @sink
+        severity: critical
+
+  path_traversal:
+    cwe: "CWE-22"
+    entries:
+      - pattern: "os.Open"
+        tree_sitter_query: |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @obj
+              field: (field_identifier) @attr
+              (#eq? @obj "os")
+              (#match? @attr "^(Open|Create|OpenFile)$"))) @sink
+        severity: high
+
+      - pattern: "ioutil.ReadFile"
+        tree_sitter_query: |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @obj
+              field: (field_identifier) @attr
+              (#match? @obj "^(ioutil|os)$")
+              (#match? @attr "^(ReadFile|WriteFile)$"))) @sink
+        severity: high
+
+sanitizers:
+  - pattern: "filepath.Clean"
+    neutralizes:
+      - path_traversal
+    description: "Cleans path traversal sequences, partial mitigation only"
+
+  - pattern: "strings.Replace"
+    neutralizes: []
+    description: "Manual sanitization - may be insufficient"
+
+  - pattern: "html.EscapeString"
+    neutralizes:
+      - xss
+    description: "Escapes HTML special characters"
