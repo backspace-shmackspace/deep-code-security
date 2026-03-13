@@ -13,7 +13,7 @@ class TestPluginDiscovery:
     """Tests for _load_plugins plugin discovery."""
 
     def test_falls_back_to_noop_when_no_plugin(self) -> None:
-        """Falls back to NoOp when dcs-exploits is not installed."""
+        """Falls back to NoOp when dcs-verification is not installed."""
         config = Config()
         sandbox, generator = _load_plugins(None, None, config)
         assert isinstance(sandbox, NoOpSandbox)
