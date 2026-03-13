@@ -1,7 +1,7 @@
 """Protocol definitions for pluggable exploit generation and sandbox execution.
 
 The public deep-code-security package defines these protocols. Concrete
-implementations live in a separate private package (e.g., dcs-exploits)
+implementations live in a separate private package (e.g., dcs-verification)
 and are discovered at import time. If no implementation is installed,
 NoOp stubs from auditor.noop are used automatically.
 """

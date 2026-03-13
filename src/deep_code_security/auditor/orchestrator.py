@@ -167,7 +167,7 @@ def _load_plugins(
     generator: ExploitGeneratorProtocol | None,
     config: Config,
 ) -> tuple[SandboxProvider, ExploitGeneratorProtocol]:
-    """Load exploit generator and sandbox from dcs-exploits if installed.
+    """Load exploit generator and sandbox from dcs-verification if installed.
 
     Falls back to NoOp implementations if the private package is not available.
     Explicit arguments take precedence over plugin discovery.
@@ -183,18 +183,18 @@ def _load_plugins(
     if sandbox is not None and generator is not None:
         return sandbox, generator
 
-    # Try to import the private dcs-exploits package
+    # Try to import the private dcs-verification package
     try:
-        import dcs_exploits  # type: ignore[import-not-found]
+        import dcs_verification  # type: ignore[import-not-found]
         if sandbox is None:
-            sandbox = dcs_exploits.create_sandbox(config)
-            logger.info("Loaded sandbox provider from dcs-exploits")
+            sandbox = dcs_verification.create_sandbox(config)
+            logger.info("Loaded sandbox provider from dcs-verification")
         if generator is None:
-            generator = dcs_exploits.create_exploit_generator()
-            logger.info("Loaded exploit generator from dcs-exploits")
+            generator = dcs_verification.create_exploit_generator()
+            logger.info("Loaded exploit generator from dcs-verification")
     except ImportError:
         logger.info(
-            "dcs-exploits not installed — using NoOp auditor "
+            "dcs-verification not installed — using NoOp auditor "
             "(Hunter and Architect phases are fully functional)"
         )
         if sandbox is None:

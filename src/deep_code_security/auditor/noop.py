@@ -1,6 +1,6 @@
 """NoOp implementations of exploit generation and sandbox execution.
 
-Used when no concrete implementation package (e.g., dcs-exploits) is installed.
+Used when no concrete implementation package (e.g., dcs-verification) is installed.
 The Hunter and Architect phases remain fully functional; the Auditor phase
 returns base confidence scores without exploit verification.
 """
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _NOOP_SCRIPT = """\
 # NoOp PoC placeholder — no exploit generator installed.
-# Install a concrete implementation (e.g., dcs-exploits) for real PoC generation.
+# Install a concrete implementation (e.g., dcs-verification) for real PoC generation.
 print("NO_EXPLOIT_GENERATOR")
 """
 
@@ -72,10 +72,10 @@ class NoOpSandbox:
         """Never called (is_available returns False), but satisfies the protocol."""
         raise RuntimeError(
             "NoOpSandbox.run_exploit called — this should not happen. "
-            "Install a concrete sandbox implementation (e.g., dcs-exploits)."
+            "Install a concrete sandbox implementation (e.g., dcs-verification)."
         )
 
     def build_images(self) -> bool:
         """No images to build."""
-        logger.info("NoOp sandbox: no images to build. Install dcs-exploits for sandbox support.")
+        logger.info("NoOp sandbox: no images to build. Install dcs-verification for sandbox support.")
         return False

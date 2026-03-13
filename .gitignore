@@ -87,7 +87,7 @@ id_ed25519.*
 !.env.example
 
 # Private plugin package (separate repo)
-dcs-exploits/
+dcs-verification/
 
 # Logs
 *.log
