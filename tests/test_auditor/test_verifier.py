@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from deep_code_security.auditor.exploit_generator import generate_exploit
 from deep_code_security.auditor.verifier import Verifier
 from deep_code_security.hunter.models import RawFinding, Sink, Source, TaintPath, TaintStep
 
@@ -55,42 +54,8 @@ def cmd_finding() -> RawFinding:
     )
 
 
-class TestExploitGenerator:
-    """Tests for ExploitGenerator."""
-
-    def test_generates_sql_injection_poc(self, sql_finding) -> None:
-        """Generates a Python PoC for SQL injection."""
-        script, script_hash = generate_exploit(sql_finding)
-        assert "SQL" in script.upper() or "sql" in script.lower()
-        assert len(script) > 50
-        assert len(script_hash) == 64  # SHA-256 hex
-
-    def test_generates_command_injection_poc(self, cmd_finding) -> None:
-        """Generates a Python PoC for command injection."""
-        script, script_hash = generate_exploit(cmd_finding)
-        assert len(script) > 50
-        assert len(script_hash) == 64
-
-    def test_poc_contains_finding_metadata(self, sql_finding) -> None:
-        """PoC script contains source/sink metadata from the finding."""
-        script, _ = generate_exploit(sql_finding)
-        # Should mention the function names
-        assert "request.form" in script or "cursor.execute" in script
-
-    def test_script_hash_is_sha256(self, sql_finding) -> None:
-        """Script hash is a valid SHA-256 hex string."""
-        import hashlib
-        script, script_hash = generate_exploit(sql_finding)
-        expected = hashlib.sha256(script.encode()).hexdigest()
-        assert script_hash == expected
-
-    def test_generates_different_scripts_per_cwe(
-        self, sql_finding, cmd_finding
-    ) -> None:
-        """Different CWE findings produce different PoC scripts."""
-        script_sql, _ = generate_exploit(sql_finding)
-        script_cmd, _ = generate_exploit(cmd_finding)
-        assert script_sql != script_cmd
+class TestInputValidation:
+    """Tests for input validation (guards against exploit template injection)."""
 
     def test_generation_rejects_malicious_function_name(self) -> None:
         """Input validation catches malicious function names before generation."""
@@ -102,7 +67,7 @@ class TestExploitGenerator:
         malicious_finding = RawFinding(
             source=Source(
                 file="/test.py", line=1, column=0,
-                function="os.system; rm -rf /",  # Malicious function name
+                function="os.system; rm -rf /",
                 category="web_input", language="python"
             ),
             sink=Sink(

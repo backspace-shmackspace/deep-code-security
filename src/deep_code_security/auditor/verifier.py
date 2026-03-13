@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 
 from deep_code_security.auditor.confidence import compute_confidence
-from deep_code_security.auditor.exploit_generator import ExploitGenerator
 from deep_code_security.auditor.models import ExploitResult, VerifiedFinding
-from deep_code_security.auditor.sandbox import SandboxManager, SandboxUnavailableError
+from deep_code_security.auditor.noop import NoOpExploitGenerator, NoOpSandbox
+from deep_code_security.auditor.protocols import ExploitGeneratorProtocol, SandboxProvider
 from deep_code_security.hunter.models import RawFinding
 
 __all__ = ["Verifier"]
@@ -23,11 +23,11 @@ class Verifier:
 
     def __init__(
         self,
-        sandbox: SandboxManager,
-        generator: ExploitGenerator | None = None,
+        sandbox: SandboxProvider | None = None,
+        generator: ExploitGeneratorProtocol | None = None,
     ) -> None:
-        self.sandbox = sandbox
-        self.generator = generator or ExploitGenerator()
+        self.sandbox = sandbox or NoOpSandbox()
+        self.generator = generator or NoOpExploitGenerator()
 
     def verify_finding(
         self,
@@ -77,7 +77,7 @@ class Verifier:
                     "Exploit result for finding %s: exit=%d, exploitable=%s",
                     finding.id, result.exit_code, result.exploitable,
                 )
-            except SandboxUnavailableError as e:
+            except RuntimeError as e:
                 logger.info(
                     "Sandbox unavailable for finding %s: %s", finding.id, e
                 )

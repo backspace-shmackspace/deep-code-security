@@ -7,7 +7,8 @@ import time
 from typing import TYPE_CHECKING
 
 from deep_code_security.auditor.models import VerifiedFinding, VerifyStats
-from deep_code_security.auditor.sandbox import SandboxManager
+from deep_code_security.auditor.noop import NoOpExploitGenerator, NoOpSandbox
+from deep_code_security.auditor.protocols import ExploitGeneratorProtocol, SandboxProvider
 from deep_code_security.auditor.verifier import Verifier
 from deep_code_security.hunter.models import RawFinding
 from deep_code_security.shared.config import Config, get_config
@@ -34,15 +35,13 @@ class AuditorOrchestrator:
     def __init__(
         self,
         config: Config | None = None,
-        sandbox: SandboxManager | None = None,
+        sandbox: SandboxProvider | None = None,
+        generator: ExploitGeneratorProtocol | None = None,
     ) -> None:
         self.config = config or get_config()
-        self.sandbox = sandbox or SandboxManager(
-            container_runtime=self.config.container_runtime,
-            max_concurrent=self.config.max_concurrent_sandboxes,
-            timeout_seconds=self.config.sandbox_timeout,
-        )
-        self.verifier = Verifier(sandbox=self.sandbox)
+        sandbox, generator = _load_plugins(sandbox, generator, self.config)
+        self.sandbox = sandbox
+        self.verifier = Verifier(sandbox=self.sandbox, generator=generator)
         # Session store: verified_finding_id -> VerifiedFinding
         self._session_verified: dict[str, VerifiedFinding] = {}
 
@@ -161,3 +160,46 @@ class AuditorOrchestrator:
             vf for fid, vf in self._session_verified.items()
             if fid in finding_ids
         ]
+
+
+def _load_plugins(
+    sandbox: SandboxProvider | None,
+    generator: ExploitGeneratorProtocol | None,
+    config: Config,
+) -> tuple[SandboxProvider, ExploitGeneratorProtocol]:
+    """Load exploit generator and sandbox from dcs-exploits if installed.
+
+    Falls back to NoOp implementations if the private package is not available.
+    Explicit arguments take precedence over plugin discovery.
+
+    Args:
+        sandbox: Explicit sandbox override (used if not None).
+        generator: Explicit generator override (used if not None).
+        config: Server configuration for sandbox settings.
+
+    Returns:
+        Tuple of (sandbox, generator).
+    """
+    if sandbox is not None and generator is not None:
+        return sandbox, generator
+
+    # Try to import the private dcs-exploits package
+    try:
+        import dcs_exploits  # type: ignore[import-not-found]
+        if sandbox is None:
+            sandbox = dcs_exploits.create_sandbox(config)
+            logger.info("Loaded sandbox provider from dcs-exploits")
+        if generator is None:
+            generator = dcs_exploits.create_exploit_generator()
+            logger.info("Loaded exploit generator from dcs-exploits")
+    except ImportError:
+        logger.info(
+            "dcs-exploits not installed — using NoOp auditor "
+            "(Hunter and Architect phases are fully functional)"
+        )
+        if sandbox is None:
+            sandbox = NoOpSandbox()
+        if generator is None:
+            generator = NoOpExploitGenerator()
+
+    return sandbox, generator

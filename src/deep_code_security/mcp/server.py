@@ -74,7 +74,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         else:
             logger.info(
                 "Container runtime available: %s",
-                self.auditor.sandbox._runtime_cmd or "unknown",
+                getattr(self.auditor.sandbox, "_runtime_cmd", None) or "unknown",
             )
 
     def _register_tools(self) -> None:
@@ -537,7 +537,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
     async def _handle_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle deep_scan_status tool call."""
         sandbox_available = self.auditor.sandbox.is_available()
-        runtime = self.auditor.sandbox._runtime_cmd or "none"
+        runtime = getattr(self.auditor.sandbox, "_runtime_cmd", None) or "none"
 
         # Check which registry files are loaded
         registries = []

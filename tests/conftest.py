@@ -131,10 +131,8 @@ def sample_raw_finding(
 
 @pytest.fixture
 def mock_sandbox():
-    """A mock SandboxManager that never runs containers."""
-    from deep_code_security.auditor.sandbox import SandboxManager
-
-    mock = MagicMock(spec=SandboxManager)
+    """A mock SandboxProvider that never runs containers."""
+    mock = MagicMock()
     mock.is_available.return_value = False
     mock._runtime_cmd = None
     return mock
@@ -142,11 +140,10 @@ def mock_sandbox():
 
 @pytest.fixture
 def mock_sandbox_available():
-    """A mock SandboxManager that reports available but returns non-exploitable results."""
+    """A mock SandboxProvider that reports available but returns non-exploitable results."""
     from deep_code_security.auditor.models import ExploitResult
-    from deep_code_security.auditor.sandbox import SandboxManager
 
-    mock = MagicMock(spec=SandboxManager)
+    mock = MagicMock()
     mock.is_available.return_value = True
     mock._runtime_cmd = "docker"
 
@@ -164,11 +161,10 @@ def mock_sandbox_available():
 
 @pytest.fixture
 def mock_sandbox_exploitable():
-    """A mock SandboxManager that returns exploitable results."""
+    """A mock SandboxProvider that returns exploitable results."""
     from deep_code_security.auditor.models import ExploitResult
-    from deep_code_security.auditor.sandbox import SandboxManager
 
-    mock = MagicMock(spec=SandboxManager)
+    mock = MagicMock()
     mock.is_available.return_value = True
     mock._runtime_cmd = "docker"
 
