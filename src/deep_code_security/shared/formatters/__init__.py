@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from deep_code_security.shared.formatters.protocol import Formatter
@@ -11,6 +11,7 @@ __all__ = [
     "get_formatter",
     "get_supported_formats",
     "register_formatter",
+    "supports_fuzz",
 ]
 
 _FORMATTERS: dict[str, type[Formatter]] = {}
@@ -51,6 +52,22 @@ def get_supported_formats() -> list[str]:
     Computed dynamically from the registry to avoid stale module-level state.
     """
     return sorted(_FORMATTERS.keys())
+
+
+def supports_fuzz(formatter: Any) -> bool:
+    """Check whether a formatter supports fuzz/replay output.
+
+    Uses runtime_checkable FuzzFormatter protocol to test structural compatibility.
+
+    Args:
+        formatter: A formatter instance.
+
+    Returns:
+        True if the formatter has format_fuzz() and format_replay() methods.
+    """
+    from deep_code_security.shared.formatters.protocol import FuzzFormatter
+
+    return isinstance(formatter, FuzzFormatter)
 
 
 def _register_builtins() -> None:

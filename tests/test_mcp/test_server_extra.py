@@ -251,4 +251,4 @@ class TestValidateServices:
         server._tools = {}
         server._handlers = {}
         await server.initialize()
-        assert len(server._tools) == 5
+        assert len(server._tools) == 6  # 5 SAST + 1 fuzz_status (deep_scan_fuzz deferred)

@@ -1,4 +1,4 @@
-"""DeepCodeSecurityMCPServer — MCP server with 5 tools, path validation, and audit logging.
+"""DeepCodeSecurityMCPServer — MCP server with 6 tools, path validation, and audit logging.
 
 Runs as a native stdio process. Never containerized. Invokes Docker/Podman CLI
 for sandbox containers (exploit verification).
@@ -78,7 +78,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             )
 
     def _register_tools(self) -> None:
-        """Register all 5 MCP tools."""
+        """Register all 6 MCP tools (deep_scan_fuzz deferred)."""
         self.register_tool(
             name="deep_scan_hunt",
             description=(
@@ -229,6 +229,45 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             input_schema={"type": "object", "properties": {}},
             handler=self._handle_status,
         )
+
+        self.register_tool(
+            name="deep_scan_fuzz_status",
+            description=(
+                "Check fuzzer availability and poll running fuzz operations. "
+                "Returns anthropic SDK availability, Vertex AI configuration, "
+                "consent status, available plugins, and container backend availability."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "fuzz_run_id": {
+                        "type": "string",
+                        "description": "Poll a specific fuzz run (optional)",
+                    },
+                },
+            },
+            handler=self._handle_fuzz_status,
+        )
+
+        # TODO: Register deep_scan_fuzz when container backend is implemented (see SD-01).
+        # The tool definition and handler stub (_handle_fuzz) are preserved below
+        # for implementation when the container backend is ready.
+        #
+        # deep_scan_fuzz input_schema:
+        # {
+        #     "type": "object",
+        #     "properties": {
+        #         "path": {"type": "string", "description": "Path to Python file/module to fuzz"},
+        #         "functions": {"type": "array", "items": {"type": "string"}},
+        #         "iterations": {"type": "integer", "default": 3},
+        #         "inputs_per_iteration": {"type": "integer", "default": 5},
+        #         "model": {"type": "string", "default": "claude-sonnet-4-6"},
+        #         "max_cost_usd": {"type": "number", "default": 2.00},
+        #         "timeout_ms": {"type": "integer", "default": 5000},
+        #         "consent": {"type": "boolean", "default": False},
+        #     },
+        #     "required": ["path", "consent"],
+        # }
 
     async def _handle_hunt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle deep_scan_hunt tool call."""
@@ -564,6 +603,82 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 }
             ]
         }
+
+    async def _handle_fuzz_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle deep_scan_fuzz_status tool call."""
+        start = time.monotonic()
+        fuzz_run_id = params.get("fuzz_run_id")
+
+        # Check anthropic availability
+        try:
+            import anthropic  # noqa: F401
+            anthropic_available = True
+        except ImportError:
+            anthropic_available = False
+
+        # Check Vertex configuration
+        vertex_configured = self.config.fuzz_use_vertex
+
+        # Check consent
+        from deep_code_security.fuzzer.consent import has_stored_consent
+        consent_stored = has_stored_consent()
+
+        # Check available plugins
+        try:
+            from deep_code_security.fuzzer.plugins.registry import registry
+            available_plugins = registry.list_plugins()
+        except Exception:
+            available_plugins = []
+
+        # Container backend is not yet implemented
+        container_backend_available = False
+
+        result: dict[str, Any] = {
+            "anthropic_available": anthropic_available,
+            "vertex_configured": vertex_configured,
+            "consent_stored": consent_stored,
+            "available_plugins": available_plugins,
+            "container_backend_available": container_backend_available,
+        }
+
+        # If fuzz_run_id is provided, return "not found" (no runs yet)
+        if fuzz_run_id:
+            result["fuzz_run"] = {
+                "fuzz_run_id": fuzz_run_id,
+                "status": "not_found",
+                "message": "No fuzz run found with this ID.",
+            }
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self._audit_log(
+            "deep_scan_fuzz_status",
+            {"fuzz_run_id": fuzz_run_id or "none"},
+            0,
+            "OK",
+            duration_ms,
+        )
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(result, ensure_ascii=False),
+                }
+            ]
+        }
+
+    async def _handle_fuzz(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle deep_scan_fuzz tool call (DEFERRED -- not registered).
+
+        This method is a stub. It raises ToolError if called directly.
+        The tool will be registered when the container-based sandbox
+        backend is implemented (see SD-01).
+        """
+        raise ToolError(
+            "deep_scan_fuzz requires container-based sandboxing, "
+            "which is not yet implemented. Use the CLI 'dcs fuzz' command instead.",
+            retryable=False,
+        )
 
     def _lookup_findings(self, finding_ids: list[str]) -> list[RawFinding]:
         """Look up findings from the server-side session store.

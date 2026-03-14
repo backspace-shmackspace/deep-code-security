@@ -1,5 +1,6 @@
-.PHONY: lint test test-hunter test-auditor test-architect test-mcp test-integration \
-        sast security build build-sandboxes clean check-vendor install install-dev
+.PHONY: lint test test-hunter test-auditor test-architect test-mcp test-fuzzer \
+        test-integration sast security build build-sandboxes clean check-vendor \
+        install install-dev audit-deps
 
 PYTHON := python3
 PYTEST := pytest
@@ -58,6 +59,12 @@ test-mcp:
 		--cov=$(SRC)/mcp \
 		--cov-report=term-missing
 
+# Run fuzzer tests
+test-fuzzer:
+	$(PYTEST) $(TESTS)/test_fuzzer -v \
+		--cov=$(SRC)/fuzzer \
+		--cov-report=term-missing
+
 # Run integration tests (requires Docker or Podman)
 test-integration:
 	$(PYTEST) $(TESTS)/test_integration -v --timeout=120
@@ -102,6 +109,11 @@ clean:
 	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -name ".coverage" -delete
 	find . -name "coverage.xml" -delete
+
+# Audit dependencies for known vulnerabilities
+audit-deps:
+	pip-audit --extra fuzz
+	pip-audit --extra vertex
 
 # Run MCP server (for development)
 serve:

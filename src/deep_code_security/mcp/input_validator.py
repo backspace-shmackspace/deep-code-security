@@ -12,10 +12,11 @@ from deep_code_security.hunter.models import RawFinding, Sink, Source, TaintPath
 
 __all__ = [
     "InputValidationError",
-    "validate_function_name",
-    "validate_variable_name",
+    "validate_crash_data",
     "validate_file_path",
+    "validate_function_name",
     "validate_raw_finding",
+    "validate_variable_name",
 ]
 
 # Strict regex patterns for field validation
@@ -248,3 +249,54 @@ def validate_raw_finding(finding: RawFinding) -> RawFinding:
         )
 
     return finding
+
+
+# ---------- Fuzz crash data validation ----------
+
+_MAX_EXCEPTION_LEN = 2048
+_MAX_TRACEBACK_LEN = 8192
+
+
+def validate_crash_data(
+    exception: str | None,
+    traceback_str: str | None,
+    target_function: str | None,
+) -> dict[str, str | None]:
+    """Validate fuzz crash data for safe inclusion in MCP responses.
+
+    Sanitizes exception messages, tracebacks, and function names from
+    target code execution (untrusted content).
+
+    Args:
+        exception: Exception string from crash.
+        traceback_str: Traceback string from crash.
+        target_function: Target function name.
+
+    Returns:
+        Dict with sanitized values.
+
+    Raises:
+        InputValidationError: If target_function fails validation.
+    """
+    result: dict[str, str | None] = {}
+
+    # Truncate exception message
+    if exception:
+        result["exception"] = exception[:_MAX_EXCEPTION_LEN]
+    else:
+        result["exception"] = None
+
+    # Truncate traceback
+    if traceback_str:
+        result["traceback"] = traceback_str[:_MAX_TRACEBACK_LEN]
+    else:
+        result["traceback"] = None
+
+    # Validate function name
+    if target_function:
+        validate_function_name(target_function)
+        result["target_function"] = target_function
+    else:
+        result["target_function"] = None
+
+    return result

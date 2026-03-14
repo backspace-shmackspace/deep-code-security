@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from string import Template
 from typing import Any
 
-from deep_code_security.shared.formatters.protocol import FullScanResult, HuntResult
+from deep_code_security.shared.formatters.protocol import (
+    FullScanResult,
+    FuzzReportResult,
+    HuntResult,
+    ReplayResultDTO,
+)
 
 __all__ = ["HtmlFormatter"]
 
@@ -315,6 +320,159 @@ class HtmlFormatter:
 
             parts.append("</details>")
             parts.append("</td></tr>")
+
+        parts.append("</tbody></table>")
+        parts.append("</div>")
+        return "\n".join(parts)
+
+    def format_fuzz(self, data: FuzzReportResult, target_path: str = "") -> str:
+        """Format fuzz run results as HTML."""
+        title = "Deep Code Security — Fuzz Report"
+        summary_html = self._build_fuzz_summary(data, target_path)
+        findings_html = self._build_fuzz_crashes(data)
+        footer_html = self._build_footer()
+
+        return _PAGE_TEMPLATE.safe_substitute(
+            title=_escape(title),
+            summary_html=summary_html,
+            findings_html=findings_html,
+            footer_html=footer_html,
+        )
+
+    def format_replay(self, data: ReplayResultDTO, target_path: str = "") -> str:
+        """Format replay results as HTML."""
+        title = "Deep Code Security — Replay Report"
+        summary_html = self._build_replay_summary(data, target_path)
+        findings_html = self._build_replay_results(data)
+        footer_html = self._build_footer()
+
+        return _PAGE_TEMPLATE.safe_substitute(
+            title=_escape(title),
+            summary_html=summary_html,
+            findings_html=findings_html,
+            footer_html=footer_html,
+        )
+
+    def _build_fuzz_summary(self, data: FuzzReportResult, target_path: str) -> str:
+        now = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        parts = [
+            '<div class="summary">',
+            f"<h1>{_escape('Fuzz Results')}</h1>",
+            "<table>",
+        ]
+        if target_path:
+            parts.append(f"<tr><th>Target</th><td>{_escape(target_path)}</td></tr>")
+        parts.extend([
+            f"<tr><th>Scan Date</th><td>{_escape(now)}</td></tr>",
+            f"<tr><th>Targets</th><td>{len(data.targets)}</td></tr>",
+            f"<tr><th>Total Inputs</th><td>{data.total_inputs}</td></tr>",
+            f"<tr><th>Crashes</th><td>{data.crash_count}</td></tr>",
+            f"<tr><th>Unique Crashes</th><td>{data.unique_crash_count}</td></tr>",
+            f"<tr><th>Timeouts</th><td>{data.timeout_count}</td></tr>",
+        ])
+        if data.coverage_percent is not None:
+            parts.append(f"<tr><th>Coverage</th><td>{data.coverage_percent:.1f}%</td></tr>")
+        if data.api_cost_usd is not None:
+            parts.append(
+                f"<tr><th>API Cost</th><td>&#36;{data.api_cost_usd:.4f}</td></tr>"
+            )
+        parts.extend(["</table>", "</div>"])
+        return "\n".join(parts)
+
+    def _build_fuzz_crashes(self, data: FuzzReportResult) -> str:
+        if not data.unique_crashes:
+            return '<div class="findings"><p class="no-findings">No crashes detected.</p></div>'
+
+        parts = ['<div class="findings">', "<h2>Crashes</h2>"]
+        parts.append('<table class="findings-table">')
+        parts.append(
+            "<thead><tr>"
+            "<th>#</th>"
+            "<th>Exception</th>"
+            "<th>Function</th>"
+            "<th>Count</th>"
+            "<th>Location</th>"
+            "</tr></thead>"
+        )
+        parts.append("<tbody>")
+
+        for i, uc in enumerate(data.unique_crashes, 1):
+            parts.append("<tr>")
+            parts.append(f"<td>{i}</td>")
+            parts.append(f"<td>{_escape(uc.exception_type)}</td>")
+            parts.append(f"<td>{_escape(uc.representative.target_function)}</td>")
+            parts.append(f"<td>{uc.count}</td>")
+            parts.append(f"<td>{_escape(uc.location or '-')}</td>")
+            parts.append("</tr>")
+
+            parts.append("<tr><td colspan='5'>")
+            parts.append("<details>")
+            parts.append(f"<summary>Details for crash #{i}</summary>")
+            parts.append(
+                f"<p><strong>Exception:</strong> {_escape(uc.representative.exception or '')}</p>"
+            )
+            parts.append(
+                f"<p><strong>Args:</strong> {_escape(str(uc.representative.args))}</p>"
+            )
+            if uc.exception_message:
+                parts.append(
+                    f"<p><strong>Message:</strong> {_escape(uc.exception_message)}</p>"
+                )
+            parts.append("</details>")
+            parts.append("</td></tr>")
+
+        parts.append("</tbody></table>")
+        parts.append("</div>")
+        return "\n".join(parts)
+
+    def _build_replay_summary(self, data: ReplayResultDTO, target_path: str) -> str:
+        now = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        parts = [
+            '<div class="summary">',
+            f"<h1>{_escape('Replay Results')}</h1>",
+            "<table>",
+        ]
+        if target_path:
+            parts.append(f"<tr><th>Target</th><td>{_escape(target_path)}</td></tr>")
+        parts.extend([
+            f"<tr><th>Date</th><td>{_escape(now)}</td></tr>",
+            f"<tr><th>Total</th><td>{data.total_count}</td></tr>",
+            f"<tr><th>Fixed</th><td>{data.fixed_count}</td></tr>",
+            f"<tr><th>Still Failing</th><td>{data.still_failing_count}</td></tr>",
+            f"<tr><th>Error</th><td>{data.error_count}</td></tr>",
+            "</table>",
+            "</div>",
+        ])
+        return "\n".join(parts)
+
+    def _build_replay_results(self, data: ReplayResultDTO) -> str:
+        if not data.results:
+            return '<div class="findings"><p class="no-findings">No replay results.</p></div>'
+
+        parts = ['<div class="findings">', "<h2>Replay Results</h2>"]
+        parts.append('<table class="findings-table">')
+        parts.append(
+            "<thead><tr>"
+            "<th>Status</th>"
+            "<th>Function</th>"
+            "<th>Original Exception</th>"
+            "<th>Replayed Exception</th>"
+            "</tr></thead>"
+        )
+        parts.append("<tbody>")
+
+        for rr in data.results:
+            sev_cls = {
+                "fixed": "severity-low",
+                "still_failing": "severity-high",
+                "error": "severity-critical",
+            }.get(rr.status, "")
+            parts.append("<tr>")
+            parts.append(f'<td class="{sev_cls}">{_escape(rr.status.upper())}</td>')
+            parts.append(f"<td>{_escape(rr.target_function)}</td>")
+            parts.append(f"<td>{_escape(rr.original_exception)}</td>")
+            parts.append(f"<td>{_escape(rr.replayed_exception or '-')}</td>")
+            parts.append("</tr>")
 
         parts.append("</tbody></table>")
         parts.append("</div>")

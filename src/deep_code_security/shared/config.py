@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
-__all__ = ["Config", "get_config"]
+logger = logging.getLogger(__name__)
+
+__all__ = ["Config", "get_config", "reset_config"]
 
 
 class Config:
@@ -49,6 +52,42 @@ class Config:
             os.environ.get("DCS_QUERY_TIMEOUT", "5.0")
         )
         self.query_max_results: int = int(os.environ.get("DCS_QUERY_MAX_RESULTS", "1000"))
+
+        # Fuzzer configuration (DCS_FUZZ_* environment variables)
+        self.fuzz_model: str = os.environ.get("DCS_FUZZ_MODEL", "claude-sonnet-4-6")
+        self.fuzz_max_iterations: int = int(os.environ.get("DCS_FUZZ_MAX_ITERATIONS", "10"))
+        self.fuzz_inputs_per_iteration: int = int(
+            os.environ.get("DCS_FUZZ_INPUTS_PER_ITER", "10")
+        )
+        self.fuzz_timeout_ms: int = int(os.environ.get("DCS_FUZZ_TIMEOUT_MS", "5000"))
+        self.fuzz_max_cost_usd: float = float(
+            os.environ.get("DCS_FUZZ_MAX_COST_USD", "5.0")
+        )
+        self.fuzz_output_dir: str = os.environ.get("DCS_FUZZ_OUTPUT_DIR", "./fuzzy-output")
+        self.fuzz_consent: bool = os.environ.get(
+            "DCS_FUZZ_CONSENT", ""
+        ).lower() in ("1", "true", "yes")
+        if self.fuzz_consent:
+            logger.warning(
+                "Consent granted via DCS_FUZZ_CONSENT environment variable. "
+                "Source code will be transmitted to the Anthropic API."
+            )
+        self.fuzz_use_vertex: bool = bool(
+            os.environ.get("GOOGLE_CLOUD_PROJECT")
+            or os.environ.get("CLOUD_ML_PROJECT_NUMBER")
+            or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+        )
+        self.fuzz_gcp_project: str = (
+            os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+            or os.environ.get("GOOGLE_CLOUD_PROJECT")
+            or os.environ.get("CLOUD_ML_PROJECT_NUMBER")
+            or ""
+        )
+        self.fuzz_gcp_region: str = os.environ.get("DCS_FUZZ_GCP_REGION", "us-east5")
+        self.fuzz_allowed_plugins: str = os.environ.get(
+            "DCS_FUZZ_ALLOWED_PLUGINS", "python"
+        )
+        self.fuzz_mcp_timeout: int = int(os.environ.get("DCS_FUZZ_MCP_TIMEOUT", "120"))
 
     @property
     def allowed_paths_str(self) -> list[str]:

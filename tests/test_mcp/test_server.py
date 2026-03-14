@@ -40,14 +40,15 @@ def server(server_config: Config) -> DeepCodeSecurityMCPServer:
 class TestToolRegistration:
     """Tests for tool registration."""
 
-    def test_all_five_tools_registered(self, server: DeepCodeSecurityMCPServer) -> None:
-        """All 5 required tools are registered."""
+    def test_all_tools_registered(self, server: DeepCodeSecurityMCPServer) -> None:
+        """All 6 required tools are registered (deep_scan_fuzz deferred)."""
         expected = {
             "deep_scan_hunt",
             "deep_scan_verify",
             "deep_scan_remediate",
             "deep_scan_full",
             "deep_scan_status",
+            "deep_scan_fuzz_status",
         }
         assert set(server._tools.keys()) == expected
 

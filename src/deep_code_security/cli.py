@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
+
+if TYPE_CHECKING:
+    from deep_code_security.fuzzer.config import FuzzerConfig
+    from deep_code_security.fuzzer.models import FuzzReport
+    from deep_code_security.shared.formatters.protocol import FuzzReportResult
 
 from deep_code_security.architect.orchestrator import ArchitectOrchestrator
 from deep_code_security.auditor.confidence import compute_confidence
@@ -14,8 +21,12 @@ from deep_code_security.auditor.orchestrator import AuditorOrchestrator
 from deep_code_security.hunter.orchestrator import HunterOrchestrator
 from deep_code_security.mcp.path_validator import PathValidationError, validate_path
 from deep_code_security.shared.config import get_config
-from deep_code_security.shared.formatters import get_formatter
+from deep_code_security.shared.formatters import get_formatter, supports_fuzz
 from deep_code_security.shared.formatters.protocol import FullScanResult, HuntResult
+
+
+# Protected write paths (rejected for --output-dir)
+_PROTECTED_WRITE_DIRS = {"src", "registries", ".git"}
 
 
 def _resolve_format(output_format: str, json_output: bool) -> str:
@@ -35,16 +46,11 @@ def _write_output(
     force: bool,
     config_allowed_paths: list[str],
 ) -> None:
-    """Write formatted output to stdout or file.
-
-    When output_file is provided, validates path and writes with UTF-8 encoding.
-    Refuses to overwrite existing files unless --force is set.
-    """
+    """Write formatted output to stdout or file."""
     if output_file is None:
         click.echo(output)
         return
 
-    # Validate output path through PathValidator
     try:
         validated_output = validate_path(output_file, config_allowed_paths)
     except PathValidationError as e:
@@ -53,7 +59,6 @@ def _write_output(
 
     output_path = Path(validated_output)
 
-    # Refuse overwrite unless --force
     if output_path.exists() and not force:
         click.echo(
             f"Error: Output file {output_file!r} already exists. "
@@ -68,6 +73,19 @@ def _write_output(
     except OSError as e:
         click.echo(f"Error: Could not write to {output_file!r}: {e}", err=True)
         sys.exit(1)
+
+
+def _validate_write_path(output_dir: str) -> None:
+    """Reject write paths inside protected directories."""
+    p = Path(output_dir).resolve()
+    for part in p.parts:
+        if part in _PROTECTED_WRITE_DIRS:
+            click.echo(
+                f"Error: Output directory {output_dir!r} is inside protected "
+                f"directory '{part}'. Choose a different location.",
+                err=True,
+            )
+            sys.exit(1)
 
 
 @click.group()
@@ -122,10 +140,8 @@ def hunt(
     """Run the Hunter phase: discover vulnerabilities via AST analysis."""
     config = get_config()
 
-    # Resolve format
     fmt_name = _resolve_format(output_format, json_output)
 
-    # Validate path
     try:
         validated_path = validate_path(path, config.allowed_paths_str)
     except PathValidationError as e:
@@ -230,10 +246,8 @@ def full_scan(
     """Run all three phases: Hunt -> Verify -> Remediate."""
     config = get_config()
 
-    # Resolve format
     fmt_name = _resolve_format(output_format, json_output)
 
-    # Validate path
     try:
         validated_path = validate_path(path, config.allowed_paths_str)
     except PathValidationError as e:
@@ -321,7 +335,7 @@ def full_scan(
 
 @cli.command()
 def status() -> None:
-    """Check sandbox health and registry info."""
+    """Check sandbox health, registry info, and fuzzer availability."""
     config = get_config()
     auditor = AuditorOrchestrator(config=config)
 
@@ -337,6 +351,411 @@ def status() -> None:
     click.echo(f"Container runtime: {runtime}")
     click.echo(f"Registries: {', '.join(sorted(registries)) or 'none'}")
     click.echo(f"Allowed paths: {', '.join(config.allowed_paths_str)}")
+
+    # Fuzzer availability
+    try:
+        import anthropic  # noqa: F401
+        anthropic_available = True
+    except ImportError:
+        anthropic_available = False
+
+    click.echo(f"Anthropic SDK: {'installed' if anthropic_available else 'not installed'}")
+
+    from deep_code_security.fuzzer.consent import has_stored_consent
+    click.echo(f"Fuzz consent: {'stored' if has_stored_consent() else 'not stored'}")
+
+    click.echo(f"Vertex AI: {'configured' if config.fuzz_use_vertex else 'not configured'}")
+
+
+# ---------- Fuzzer CLI Commands ----------
+
+
+@cli.command()
+@click.argument("target")
+@click.option("--function", "-F", multiple=True, help="Specific function(s) to fuzz.")
+@click.option("--iterations", "-n", default=10, help="Maximum fuzzing iterations.")
+@click.option("--inputs-per-iter", default=10, help="Inputs per iteration.")
+@click.option("--timeout", default=5000, metavar="MS", help="Per-input timeout in ms.")
+@click.option("--model", default="claude-sonnet-4-6", help="Claude model to use.")
+@click.option("--output-dir", default="./fuzzy-output", metavar="PATH", help="Output directory.")
+@click.option(
+    "--format", "-f", "output_format",
+    type=click.Choice(["text", "json", "sarif", "html"]),
+    default="text",
+)
+@click.option(
+    "--output-file", "-o", default=None, metavar="PATH",
+    help="Write output to file.",
+)
+@click.option("--force", is_flag=True, default=False, help="Overwrite existing output file.")
+@click.option("--max-cost", default=5.00, metavar="USD", help="API cost budget.")
+@click.option("--consent", "consent_flag", is_flag=True, help="Consent to API transmission.")
+@click.option("--dry-run", is_flag=True, help="Preview what would be sent.")
+@click.option("--vertex", is_flag=True, help="Use Vertex AI backend.")
+@click.option("--gcp-project", default=None, help="GCP project ID.")
+@click.option("--gcp-region", default="us-east5", help="GCP region.")
+@click.option("--allow-side-effects", is_flag=True, help="Include functions with side effects.")
+@click.option("--verbose", is_flag=True, help="Verbose output.")
+@click.option("--plugin", default="python", help="Fuzzer plugin to use.")
+@click.option("--seed-corpus", default=None, metavar="PATH", help="Seed corpus directory.")
+def fuzz(
+    target: str,
+    function: tuple[str, ...],
+    iterations: int,
+    inputs_per_iter: int,
+    timeout: int,
+    model: str,
+    output_dir: str,
+    output_format: str,
+    output_file: str | None,
+    force: bool,
+    max_cost: float,
+    consent_flag: bool,
+    dry_run: bool,
+    vertex: bool,
+    gcp_project: str | None,
+    gcp_region: str,
+    allow_side_effects: bool,
+    verbose: bool,
+    plugin: str,
+    seed_corpus: str | None,
+) -> None:
+    """Run AI-powered fuzzer against a Python target."""
+    config = get_config()
+
+    # Validate target path
+    try:
+        validated_target = validate_path(target, config.allowed_paths_str)
+    except PathValidationError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Validate output directory (write-path protection)
+    _validate_write_path(output_dir)
+
+    # Build FuzzerConfig from DCS config + CLI overrides
+    from deep_code_security.fuzzer.config import FuzzerConfig
+
+    fuzzer_config = FuzzerConfig.from_dcs_config(
+        config,
+        target_path=validated_target,
+        target_functions=list(function) if function else [],
+        max_iterations=iterations,
+        inputs_per_iteration=inputs_per_iter,
+        timeout_ms=timeout,
+        model=model,
+        output_dir=output_dir,
+        max_cost_usd=max_cost,
+        consent=consent_flag or config.fuzz_consent,
+        dry_run=dry_run,
+        use_vertex=vertex or config.fuzz_use_vertex,
+        gcp_project=gcp_project or config.fuzz_gcp_project,
+        gcp_region=gcp_region,
+        allow_side_effects=allow_side_effects,
+        verbose=verbose,
+        plugin_name=plugin,
+        seed_corpus_path=seed_corpus,
+        report_format=output_format,
+    )
+
+    # Run fuzzer
+    from deep_code_security.fuzzer.orchestrator import FuzzOrchestrator
+
+    orchestrator = FuzzOrchestrator(
+        config=fuzzer_config,
+        install_signal_handlers=True,
+    )
+
+    try:
+        report = orchestrator.run()
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Format output
+    formatter = get_formatter(output_format)
+    if not supports_fuzz(formatter):
+        click.echo(
+            f"Error: Formatter '{output_format}' does not support fuzz output.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Build FuzzReportResult DTO
+    fuzz_result = _build_fuzz_report_result(report, fuzzer_config)
+    output = formatter.format_fuzz(fuzz_result, target_path=validated_target)
+
+    _write_output(output, output_file, force, config.allowed_paths_str)
+
+
+@cli.command()
+@click.argument("corpus_dir")
+@click.option("--target", required=True, help="Path to the target module.")
+@click.option("--timeout", default=5000, metavar="MS", help="Per-input timeout in ms.")
+@click.option(
+    "--format", "-f", "output_format",
+    type=click.Choice(["text", "json", "sarif", "html"]),
+    default="text",
+)
+@click.option("--output-file", "-o", default=None, metavar="PATH")
+@click.option("--force", is_flag=True, default=False)
+def replay(
+    corpus_dir: str,
+    target: str,
+    timeout: int,
+    output_format: str,
+    output_file: str | None,
+    force: bool,
+) -> None:
+    """Re-execute saved crash inputs to check for regressions."""
+    config = get_config()
+
+    try:
+        validated_target = validate_path(target, config.allowed_paths_str)
+    except PathValidationError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    corpus_path = Path(corpus_dir)
+    if not corpus_path.exists():
+        click.echo(f"Error: Corpus directory not found: {corpus_dir}", err=True)
+        sys.exit(1)
+
+    from deep_code_security.fuzzer.corpus.manager import CorpusManager
+    from deep_code_security.fuzzer.replay.runner import ReplayRunner
+
+    corpus = CorpusManager(corpus_path)
+    crashes = corpus.get_all_crashes()
+
+    if not crashes:
+        click.echo("No crash inputs found in corpus.", err=True)
+        sys.exit(0)
+
+    try:
+        runner = ReplayRunner(
+            target_path=validated_target,
+            timeout_ms=timeout,
+        )
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Replaying {len(crashes)} crash inputs...", err=True)
+    results = runner.replay_all(crashes)
+
+    # Build DTO
+    from deep_code_security.shared.formatters.protocol import ReplayResultDTO, ReplayResultEntry
+
+    entries = [
+        ReplayResultEntry(
+            status=r.status,
+            target_function=r.original.input.target_function,
+            original_exception=r.original_exception,
+            replayed_exception=r.replayed_exception,
+            args=list(r.original.input.args),
+            kwargs=dict(r.original.input.kwargs),
+        )
+        for r in results
+    ]
+
+    dto = ReplayResultDTO(
+        results=entries,
+        fixed_count=sum(1 for r in results if r.status == "fixed"),
+        still_failing_count=sum(1 for r in results if r.status == "still_failing"),
+        error_count=sum(1 for r in results if r.status == "error"),
+        total_count=len(results),
+        target_path=validated_target,
+    )
+
+    formatter = get_formatter(output_format)
+    if not supports_fuzz(formatter):
+        click.echo(
+            f"Error: Formatter '{output_format}' does not support replay output.",
+            err=True,
+        )
+        sys.exit(1)
+
+    output = formatter.format_replay(dto, target_path=validated_target)
+    _write_output(output, output_file, force, config.allowed_paths_str)
+
+
+@cli.command()
+@click.argument("corpus_dir")
+@click.option("--crashes-only", is_flag=True, help="Show only crash entries.")
+def corpus(corpus_dir: str, crashes_only: bool) -> None:
+    """Inspect corpus contents."""
+    corpus_path = Path(corpus_dir)
+    if not corpus_path.exists():
+        click.echo(f"Error: Corpus directory not found: {corpus_dir}", err=True)
+        sys.exit(1)
+
+    from deep_code_security.fuzzer.corpus.manager import CorpusManager
+
+    mgr = CorpusManager(corpus_path)
+    summary = mgr.get_summary()
+
+    click.echo(f"Corpus: {corpus_dir}")
+    click.echo(f"  Total inputs: {summary['total_inputs']}")
+    click.echo(f"  Crash files: {summary['crash_files']}")
+    click.echo(f"  Interesting files: {summary['interesting_count']}")
+    click.echo(f"  Unique crash signatures: {summary['crash_count']}")
+
+    if crashes_only:
+        crashes = mgr.get_all_crashes()
+        if crashes:
+            click.echo(f"\nCrashes ({len(crashes)}):")
+            for c in crashes[:20]:
+                click.echo(
+                    f"  {c.input.target_function}: {(c.exception or '')[:80]}"
+                )
+            if len(crashes) > 20:
+                click.echo(f"  ... and {len(crashes) - 20} more")
+
+
+@cli.command("fuzz-plugins")
+def fuzz_plugins() -> None:
+    """List available fuzzer plugins."""
+    from deep_code_security.fuzzer.plugins.registry import registry
+
+    plugins = registry.list_plugins()
+    if plugins:
+        click.echo("Available fuzzer plugins:")
+        for name in plugins:
+            click.echo(f"  - {name}")
+    else:
+        click.echo("No fuzzer plugins found.")
+        click.echo("Install plugins or check DCS_FUZZ_ALLOWED_PLUGINS.")
+
+
+@cli.command()
+@click.argument("output_dir")
+@click.option(
+    "--format", "-f", "output_format",
+    type=click.Choice(["text", "json", "sarif"]),
+    default=None,
+)
+def report(output_dir: str, output_format: str | None) -> None:
+    """View saved fuzz reports from output directory."""
+    output_path = Path(output_dir)
+    if not output_path.exists():
+        click.echo(f"Error: Output directory not found: {output_dir}", err=True)
+        sys.exit(1)
+
+    # Look for report files
+    extensions = {".txt": "text", ".json": "json", ".sarif": "sarif"}
+    found = []
+    for ext, fmt in extensions.items():
+        report_file = output_path / f"report{ext}"
+        if report_file.exists():
+            found.append((report_file, fmt))
+
+    if not found:
+        click.echo(f"No report files found in {output_dir}", err=True)
+        sys.exit(1)
+
+    # Select format
+    if output_format:
+        match = [f for f in found if f[1] == output_format]
+        if not match:
+            click.echo(
+                f"No {output_format} report found. Available: "
+                f"{', '.join(f[1] for f in found)}",
+                err=True,
+            )
+            sys.exit(1)
+        report_file = match[0][0]
+    else:
+        report_file = found[0][0]
+
+    content = report_file.read_text(encoding="utf-8")
+    click.echo(content)
+
+
+def _build_fuzz_report_result(
+    report: FuzzReport, fuzzer_config: FuzzerConfig
+) -> FuzzReportResult:
+    """Build FuzzReportResult DTO from FuzzReport + FuzzerConfig."""
+    from deep_code_security.shared.formatters.protocol import (
+        FuzzConfigSummary,
+        FuzzCrashSummary,
+        FuzzReportResult,
+        FuzzTargetInfo,
+        UniqueCrashSummary,
+    )
+
+    config_summary = FuzzConfigSummary(
+        target_path=fuzzer_config.target_path,
+        plugin=fuzzer_config.plugin_name,
+        model=fuzzer_config.model,
+        max_iterations=fuzzer_config.max_iterations,
+        inputs_per_iteration=fuzzer_config.inputs_per_iteration,
+        timeout_ms=fuzzer_config.timeout_ms,
+    )
+
+    targets = [
+        FuzzTargetInfo(
+            qualified_name=t.qualified_name,
+            signature=t.signature,
+            module_path=t.module_path,
+            complexity=t.complexity,
+        )
+        for t in report.targets
+    ]
+
+    crashes = [
+        FuzzCrashSummary(
+            target_function=c.input.target_function,
+            exception=c.exception,
+            args=list(c.input.args),
+            kwargs=dict(c.input.kwargs),
+            traceback=c.traceback,
+            timed_out=c.timed_out,
+        )
+        for c in report.crashes
+    ]
+
+    unique_crashes = [
+        UniqueCrashSummary(
+            signature=uc.signature,
+            exception_type=uc.exception_type,
+            exception_message=uc.exception_message,
+            location=uc.location,
+            count=uc.count,
+            target_functions=uc.target_functions,
+            representative=FuzzCrashSummary(
+                target_function=uc.representative.input.target_function,
+                exception=uc.representative.exception,
+                args=list(uc.representative.input.args),
+                kwargs=dict(uc.representative.input.kwargs),
+                traceback=uc.representative.traceback,
+                timed_out=uc.representative.timed_out,
+            ),
+        )
+        for uc in report.unique_crashes
+    ]
+
+    coverage_percent = None
+    if report.final_coverage:
+        coverage_percent = report.final_coverage.coverage_percent
+
+    api_cost = None
+    if report.api_usage:
+        api_cost = report.api_usage.estimate_cost_usd(fuzzer_config.model)
+
+    return FuzzReportResult(
+        config_summary=config_summary,
+        targets=targets,
+        crashes=crashes,
+        unique_crashes=unique_crashes,
+        total_inputs=getattr(report, "total_inputs", 0),
+        crash_count=getattr(report, "crash_count", 0),
+        unique_crash_count=len(unique_crashes),
+        timeout_count=getattr(report, "timeout_count", 0),
+        total_iterations=getattr(report, "total_iterations", 0),
+        coverage_percent=coverage_percent,
+        api_cost_usd=api_cost,
+        timestamp=getattr(report, "timestamp", 0.0),
+    )
 
 
 if __name__ == "__main__":
