@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -15,13 +14,66 @@ from deep_code_security.auditor.orchestrator import AuditorOrchestrator
 from deep_code_security.hunter.orchestrator import HunterOrchestrator
 from deep_code_security.mcp.path_validator import PathValidationError, validate_path
 from deep_code_security.shared.config import get_config
-from deep_code_security.shared.json_output import serialize_model, serialize_models
+from deep_code_security.shared.formatters import get_formatter
+from deep_code_security.shared.formatters.protocol import FullScanResult, HuntResult
+
+
+def _resolve_format(output_format: str, json_output: bool) -> str:
+    """Resolve output format, handling deprecated --json-output flag."""
+    if json_output:
+        click.echo(
+            "Warning: --json-output is deprecated. Use --format json instead.",
+            err=True,
+        )
+        return "json"
+    return output_format
+
+
+def _write_output(
+    output: str,
+    output_file: str | None,
+    force: bool,
+    config_allowed_paths: list[str],
+) -> None:
+    """Write formatted output to stdout or file.
+
+    When output_file is provided, validates path and writes with UTF-8 encoding.
+    Refuses to overwrite existing files unless --force is set.
+    """
+    if output_file is None:
+        click.echo(output)
+        return
+
+    # Validate output path through PathValidator
+    try:
+        validated_output = validate_path(output_file, config_allowed_paths)
+    except PathValidationError as e:
+        click.echo(f"Error: Output file path validation failed: {e}", err=True)
+        sys.exit(1)
+
+    output_path = Path(validated_output)
+
+    # Refuse overwrite unless --force
+    if output_path.exists() and not force:
+        click.echo(
+            f"Error: Output file {output_file!r} already exists. "
+            f"Use --force to overwrite.",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        output_path.write_text(output, encoding="utf-8")
+        click.echo(f"Output written to {validated_output}", err=True)
+    except OSError as e:
+        click.echo(f"Error: Could not write to {output_file!r}: {e}", err=True)
+        sys.exit(1)
 
 
 @click.group()
 @click.version_option(package_name="deep-code-security")
 def cli() -> None:
-    """deep-code-security — Multi-language SAST with agentic verification."""
+    """deep-code-security -- Multi-language SAST with agentic verification."""
     pass
 
 
@@ -38,17 +90,40 @@ def cli() -> None:
 )
 @click.option("--max-results", default=100, help="Maximum findings per page.")
 @click.option("--offset", default=0, help="Pagination offset.")
-@click.option("--json-output", is_flag=True, help="Output raw JSON to stdout.")
+@click.option(
+    "--format", "-f", "output_format",
+    type=click.Choice(["text", "json", "sarif", "html"]),
+    default="text",
+    help="Output format (default: text).",
+)
+@click.option(
+    "--json-output", is_flag=True, hidden=True,
+    help="[DEPRECATED] Use --format json instead.",
+)
+@click.option(
+    "--output-file", "-o", type=click.Path(),
+    help="Write output to file instead of stdout.",
+)
+@click.option(
+    "--force", is_flag=True, default=False,
+    help="Overwrite existing output file.",
+)
 def hunt(
     path: str,
     language: tuple[str, ...],
     severity: str,
     max_results: int,
     offset: int,
+    output_format: str,
     json_output: bool,
+    output_file: str | None,
+    force: bool,
 ) -> None:
     """Run the Hunter phase: discover vulnerabilities via AST analysis."""
     config = get_config()
+
+    # Resolve format
+    fmt_name = _resolve_format(output_format, json_output)
 
     # Validate path
     try:
@@ -69,28 +144,17 @@ def hunt(
         offset=offset,
     )
 
-    if json_output:
-        output = {
-            "findings": serialize_models(findings),
-            "stats": serialize_model(stats),
-            "total_count": total_count,
-            "has_more": has_more,
-        }
-        click.echo(json.dumps(output, indent=2, ensure_ascii=False))
-    else:
-        click.echo(
-            f"Scanned {stats.files_scanned} files, found {total_count} findings "
-            f"({stats.scan_duration_ms}ms)",
-            err=True,
-        )
-        for f in findings:
-            click.echo(
-                f"[{f.severity.upper()}] {f.vulnerability_class} "
-                f"in {Path(f.source.file).name}:{f.source.line} -> "
-                f"{Path(f.sink.file).name}:{f.sink.line}"
-            )
-        if has_more:
-            click.echo(f"... and more (use --offset {offset + max_results})", err=True)
+    hunt_result = HuntResult(
+        findings=findings,
+        stats=stats,
+        total_count=total_count,
+        has_more=has_more,
+    )
+
+    formatter = get_formatter(fmt_name)
+    output = formatter.format_hunt(hunt_result, target_path=validated_path)
+
+    _write_output(output, output_file, force, config.allowed_paths_str)
 
 
 @cli.command()
@@ -132,7 +196,24 @@ def verify(
 @click.option("--max-results", default=100, help="Maximum findings to return.")
 @click.option("--max-verifications", default=50, help="Maximum findings to verify.")
 @click.option("--timeout", default=30, help="Sandbox timeout in seconds.")
-@click.option("--json-output", is_flag=True, help="Output raw JSON to stdout.")
+@click.option(
+    "--format", "-f", "output_format",
+    type=click.Choice(["text", "json", "sarif", "html"]),
+    default="text",
+    help="Output format (default: text).",
+)
+@click.option(
+    "--json-output", is_flag=True, hidden=True,
+    help="[DEPRECATED] Use --format json instead.",
+)
+@click.option(
+    "--output-file", "-o", type=click.Path(),
+    help="Write output to file instead of stdout.",
+)
+@click.option(
+    "--force", is_flag=True, default=False,
+    help="Overwrite existing output file.",
+)
 def full_scan(
     path: str,
     language: tuple[str, ...],
@@ -141,10 +222,16 @@ def full_scan(
     max_results: int,
     max_verifications: int,
     timeout: int,
+    output_format: str,
     json_output: bool,
+    output_file: str | None,
+    force: bool,
 ) -> None:
     """Run all three phases: Hunt -> Verify -> Remediate."""
     config = get_config()
+
+    # Resolve format
+    fmt_name = _resolve_format(output_format, json_output)
 
     # Validate path
     try:
@@ -215,26 +302,21 @@ def full_scan(
             target_path=validated_path,
         )
 
-    if json_output:
-        output = {
-            "findings": serialize_models(findings),
-            "verified": serialize_models(verified),
-            "guidance": serialize_models(guidance),
-            "hunt_stats": serialize_model(hunt_stats),
-            "verify_stats": serialize_model(verify_stats) if verify_stats else None,
-            "remediate_stats": serialize_model(remediate_stats) if remediate_stats else None,
-            "total_count": total_count,
-            "has_more": has_more,
-        }
-        click.echo(json.dumps(output, indent=2, ensure_ascii=False))
-    else:
-        click.echo("\n=== RESULTS ===", err=False)
-        confirmed = [v for v in verified if v.verification_status == "confirmed"]
-        likely = [v for v in verified if v.verification_status == "likely"]
-        click.echo(f"Total findings: {total_count}", err=False)
-        click.echo(f"Confirmed: {len(confirmed)}", err=False)
-        click.echo(f"Likely: {len(likely)}", err=False)
-        click.echo(f"Guidance items: {len(guidance)}", err=False)
+    full_scan_result = FullScanResult(
+        findings=findings,
+        verified=verified,
+        guidance=guidance,
+        hunt_stats=hunt_stats,
+        verify_stats=verify_stats,
+        remediate_stats=remediate_stats,
+        total_count=total_count,
+        has_more=has_more,
+    )
+
+    formatter = get_formatter(fmt_name)
+    output = formatter.format_full_scan(full_scan_result, target_path=validated_path)
+
+    _write_output(output, output_file, force, config.allowed_paths_str)
 
 
 @cli.command()
