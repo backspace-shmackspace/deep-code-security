@@ -1,23 +1,38 @@
 # deep-code-security
 
-Multi-language Static Application Security Testing (SAST) tool with agentic verification. Uses tree-sitter for deterministic AST parsing, sandbox-verified exploit PoCs, and structured remediation guidance. Exposes all functionality via an MCP server for Claude Code integration.
+Multi-language SAST tool with agentic verification and AI-powered fuzzing. Two analysis modes:
+1. **Static Analysis (SAST)** - Uses tree-sitter for deterministic AST parsing, sandbox-verified exploit PoCs, and structured remediation guidance
+2. **Dynamic Analysis (Fuzzing)** - AI-powered fuzzer with coverage-guided feedback, crash deduplication, and corpus management
+
+Exposes all functionality via an MCP server for Claude Code integration.
 
 ## Quick Start
 
 ```bash
-# Install
+# Install (basic)
 pip install -e ".[dev]"
 
-# Run via CLI
+# Install with fuzzing support
+pip install -e ".[dev,fuzz]"
+
+# Static analysis via CLI
 dcs hunt /path/to/project
 dcs verify --finding-ids <id1> <id2>
-dcs remediate --finding-ids <id1> --target-path /path/to/project
+
+# Dynamic analysis (fuzzing) via CLI
+dcs fuzz /path/to/target.py
+dcs replay /path/to/corpus
+dcs corpus /path/to/corpus
+dcs fuzz-plugins
+dcs report /path/to/output
 
 # Run via MCP server
 python -m deep_code_security.mcp
 ```
 
 ## Architecture
+
+### Static Analysis (SAST)
 
 ```
 Target Codebase
@@ -31,6 +46,17 @@ AUDITOR    PoC generation → sandbox execution → confidence scoring
     v
 ARCHITECT  context gather → guidance generation → dependency analysis
            Output: RemediationGuidance[] (JSON)
+```
+
+### Dynamic Analysis (Fuzzing)
+
+```
+Target Function
+    |
+    v
+FUZZER     LLM-guided input generation → sandboxed execution →
+           crash detection → corpus management → coverage tracking
+           Output: CrashReport[] (JSON, with reproducer inputs)
 ```
 
 ### Supported Languages (v1)
@@ -48,6 +74,9 @@ cd deep-code-security
 
 # Install with dev dependencies
 pip install -e ".[dev]"
+
+# Install with fuzzing support (requires anthropic SDK)
+pip install -e ".[dev,fuzz]"
 
 # Build sandbox images (requires Docker or Podman)
 make build-sandboxes
@@ -67,7 +96,8 @@ Add to `~/.claude/settings.json`:
       "env": {
         "DCS_REGISTRY_PATH": "/path/to/deep-code-security/registries",
         "DCS_ALLOWED_PATHS": "/path/to/projects",
-        "DCS_CONTAINER_RUNTIME": "auto"
+        "DCS_CONTAINER_RUNTIME": "auto",
+        "ANTHROPIC_API_KEY": "your-api-key-here"
       }
     }
   }
@@ -77,6 +107,8 @@ Add to `~/.claude/settings.json`:
 ### Optional Environment Variables
 
 For advanced tuning, additional variables are available:
+
+**Static Analysis**:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -88,6 +120,25 @@ For advanced tuning, additional variables are available:
 | `DCS_QUERY_TIMEOUT` | `5.0` | Tree-sitter query timeout in seconds |
 | `DCS_QUERY_MAX_RESULTS` | `1000` | Max results per tree-sitter query |
 
+**Dynamic Analysis (Fuzzing)**:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | (none) | API key for Claude (required for fuzzing) |
+| `GOOGLE_CLOUD_PROJECT` | (none) | GCP project ID for Vertex AI (optional) |
+| `CLOUD_ML_PROJECT_NUMBER` | (none) | GCP project number for Vertex AI (optional) |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | (none) | Vertex AI project override (optional) |
+| `DCS_FUZZ_MODEL` | `claude-sonnet-4-6` | Claude model for input generation |
+| `DCS_FUZZ_MAX_ITERATIONS` | `10` | Max fuzzing iterations |
+| `DCS_FUZZ_INPUTS_PER_ITER` | `10` | Inputs generated per iteration |
+| `DCS_FUZZ_TIMEOUT_MS` | `5000` | Per-input execution timeout |
+| `DCS_FUZZ_MAX_COST_USD` | `5.0` | API cost budget |
+| `DCS_FUZZ_OUTPUT_DIR` | `./fuzzy-output` | Corpus and report output directory |
+| `DCS_FUZZ_CONSENT` | `false` | Pre-configured consent for CI |
+| `DCS_FUZZ_GCP_REGION` | `us-east5` | GCP region for Vertex AI |
+| `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugins |
+| `DCS_FUZZ_MCP_TIMEOUT` | `120` | Hard wall-clock timeout for MCP fuzz invocations |
+
 ## MCP Tools
 
 | Tool | Description |
@@ -97,6 +148,7 @@ For advanced tuning, additional variables are available:
 | `deep_scan_remediate` | Run Architect phase (remediation guidance) |
 | `deep_scan_full` | Run all three phases sequentially |
 | `deep_scan_status` | Check sandbox health and registry info |
+| `deep_scan_fuzz_status` | Check fuzzer availability and configuration |
 
 ## Confidence Scoring
 
@@ -133,6 +185,7 @@ make test-hunter    # Hunter tests only
 make test-auditor   # Auditor tests only
 make test-architect # Architect tests only
 make test-mcp       # MCP server tests only
+make test-fuzzer    # Fuzzer tests only
 make sast           # Security scan with bandit
 make security       # sast + pip-audit
 ```
@@ -156,6 +209,10 @@ See `registries/README.md` for the YAML registry format documentation.
 4. **No cross-language taint** — Python calling C via FFI is not analyzed. Each language is analyzed independently.
 
 5. **No interprocedural analysis** — call graphs across functions/files are not traced in v1. Deferred to v1.1.
+
+6. **Fuzzer requires optional dependencies** — dynamic analysis requires `pip install -e ".[fuzz]"` to install the `anthropic` SDK and related packages. The fuzzer will not be available without these dependencies.
+
+7. **`deep_scan_fuzz` MCP tool is deferred** — blocked on container-based sandbox backend. Only `deep_scan_fuzz_status` is active. CLI fuzzing uses rlimits-only sandboxing.
 
 ## Security Model
 

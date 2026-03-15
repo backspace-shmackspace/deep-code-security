@@ -30,7 +30,7 @@ src/deep_code_security/
         plugins/     # Language-specific target plugins (Python MVP)
         reporting/   # Crash deduplication
         replay/      # Re-execute saved crash inputs
-    mcp/             # MCP server (BaseMCPServer, 6 tools, stdio transport)
+    mcp/             # MCP server (BaseMCPServer, 6 active tools (7th deferred), stdio transport)
         shared/      # Vendored from helper-mcps (BaseMCPServer base class)
 registries/          # YAML source/sink definitions per language
 sandbox/             # Docker images for exploit execution
@@ -105,6 +105,10 @@ tests/               # pytest suite (90%+ coverage required)
 | `DCS_MAX_CONCURRENT_SANDBOXES` | `2` | Concurrency limit for sandbox execution |
 | `DCS_QUERY_TIMEOUT` | `5.0` | Tree-sitter query timeout in seconds |
 | `DCS_QUERY_MAX_RESULTS` | `1000` | Max results per tree-sitter query |
+| `ANTHROPIC_API_KEY` | (none) | API key for Claude (required for fuzzing) |
+| `GOOGLE_CLOUD_PROJECT` | (none) | GCP project ID for Vertex AI (optional) |
+| `CLOUD_ML_PROJECT_NUMBER` | (none) | GCP project number for Vertex AI (optional) |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | (none) | Vertex AI project override (optional) |
 | `DCS_FUZZ_MODEL` | `claude-sonnet-4-6` | Claude model for input generation |
 | `DCS_FUZZ_MAX_ITERATIONS` | `10` | Max fuzzing iterations |
 | `DCS_FUZZ_INPUTS_PER_ITER` | `10` | Inputs generated per iteration |
