@@ -88,6 +88,9 @@ class Config:
             "DCS_FUZZ_ALLOWED_PLUGINS", "python"
         )
         self.fuzz_mcp_timeout: int = int(os.environ.get("DCS_FUZZ_MCP_TIMEOUT", "120"))
+        self.fuzz_container_image: str = os.environ.get(
+            "DCS_FUZZ_CONTAINER_IMAGE", "dcs-fuzz-python:latest"
+        )
 
     @property
     def allowed_paths_str(self) -> list[str]:

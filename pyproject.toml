@@ -77,6 +77,9 @@ deep_code_security = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-v"
+markers = [
+    "integration: marks tests as integration tests (require Podman + built images)",
+]
 
 [tool.ruff]
 line-length = 100

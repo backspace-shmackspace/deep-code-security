@@ -17,6 +17,7 @@ from deep_code_security.fuzzer.exceptions import (
     AIEngineError,
     CircuitBreakerError,
 )
+from deep_code_security.fuzzer.execution.sandbox import ContainerBackend
 from deep_code_security.fuzzer.models import CoverageReport, FuzzReport, FuzzResult
 from deep_code_security.fuzzer.plugins.registry import registry
 
@@ -35,14 +36,20 @@ class FuzzOrchestrator:
         install_signal_handlers: If True (default), install SIGINT/SIGTERM handlers.
             Set to False when called from MCP server to avoid overriding the
             server's own signal handlers.
+        backend: Optional execution backend to inject into the plugin. When
+            provided (e.g. ContainerBackend for MCP runs), the backend is passed
+            to plugin.set_backend() after the plugin is retrieved from the registry.
+            When None (default), the plugin uses its own default backend.
     """
 
     def __init__(
         self,
         config: FuzzerConfig,
         install_signal_handlers: bool = True,
+        backend: Any | None = None,
     ) -> None:
         self.config = config
+        self._backend = backend
         self._shutdown_requested = False
         self._partial_results: list[FuzzResult] = []
         if install_signal_handlers:
@@ -89,6 +96,15 @@ class FuzzOrchestrator:
 
         # Get plugin
         plugin = registry.get_plugin(config.plugin_name)
+
+        # Inject backend if one was specified (e.g. ContainerBackend from MCP)
+        if self._backend is not None:
+            plugin.set_backend(self._backend)
+            logger.debug(
+                "FuzzOrchestrator: injected %s into plugin %s",
+                type(self._backend).__name__,
+                plugin.name,
+            )
 
         # Discover targets
         logger.info("Discovering targets in %s...", config.target_path)
@@ -194,6 +210,10 @@ class FuzzOrchestrator:
                 iteration_results: list[FuzzResult] = []
                 coverage_data_list: list[dict] = []
 
+                # Coverage collection inside containers is deferred (plan SD-01).
+                # The container worker cannot write to host-side .coverage paths.
+                collect_coverage = not isinstance(self._backend, ContainerBackend)
+
                 for fuzz_input in inputs:
                     if self._shutdown_requested:
                         break
@@ -201,7 +221,7 @@ class FuzzOrchestrator:
                     result = plugin.execute(
                         fuzz_input=fuzz_input,
                         timeout_ms=config.timeout_ms,
-                        collect_coverage=True,
+                        collect_coverage=collect_coverage,
                     )
                     iteration_results.append(result)
                     all_results.append(result)

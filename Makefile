@@ -1,6 +1,6 @@
 .PHONY: lint test test-hunter test-auditor test-architect test-mcp test-fuzzer \
-        test-integration sast security build build-sandboxes clean check-vendor \
-        install install-dev audit-deps
+        test-integration sast security build build-sandboxes build-fuzz-sandbox \
+        clean check-vendor install install-dev audit-deps
 
 PYTHON := python3
 PYTEST := pytest
@@ -76,6 +76,10 @@ sast:
 # Security audit (sast + dependency audit)
 security: sast
 	pip-audit
+
+# Build the fuzzer sandbox container image (Podman)
+build-fuzz-sandbox:
+	podman build -t dcs-fuzz-python:latest -f sandbox/Containerfile.fuzz-python .
 
 # Build sandbox Docker images
 build-sandboxes:

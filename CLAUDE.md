@@ -30,7 +30,7 @@ src/deep_code_security/
         plugins/     # Language-specific target plugins (Python MVP)
         reporting/   # Crash deduplication
         replay/      # Re-execute saved crash inputs
-    mcp/             # MCP server (BaseMCPServer, 6 active tools (7th deferred), stdio transport)
+    mcp/             # MCP server (BaseMCPServer, 6 tools always + deep_scan_fuzz when Podman available, stdio transport)
         shared/      # Vendored from helper-mcps (BaseMCPServer base class)
 registries/          # YAML source/sink definitions per language
 sandbox/             # Docker images for exploit execution
@@ -74,7 +74,9 @@ tests/               # pytest suite (90%+ coverage required)
 | Sandbox transport | subprocess CLI | No Docker socket mount (avoids root-equivalent host access) |
 | MCP deployment | Native stdio | Containerized MCP + Docker socket = root-equivalent |
 | Architect output | Guidance only | Apply-ready patches are frequently wrong; guidance avoids trust erosion |
-| Fuzzer sandbox | rlimits-only (CLI) | Container backend deferred; `deep_scan_fuzz` MCP tool blocked until then |
+| Fuzzer sandbox CLI | rlimits-only (SubprocessBackend) | Fast, zero-dependency path for local development |
+| Fuzzer sandbox MCP | ContainerBackend (Podman) | SD-01 resolved; MCP runs require full container isolation |
+| Fuzzer runtime | Podman (not Docker) | Rootless Podman avoids Docker daemon socket (root-equivalent) |
 | Fuzzer eval() | Restricted + AST-validated | Justified deviation; dual-layer defense (SD-02) |
 
 ## CLI Commands
@@ -119,6 +121,19 @@ tests/               # pytest suite (90%+ coverage required)
 | `DCS_FUZZ_GCP_REGION` | `us-east5` | GCP region for Vertex AI |
 | `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugin names |
 | `DCS_FUZZ_MCP_TIMEOUT` | `120` | Hard wall-clock timeout for MCP fuzz invocations |
+| `DCS_FUZZ_CONTAINER_IMAGE` | `dcs-fuzz-python:latest` | Podman image used by ContainerBackend for MCP fuzz runs |
+
+## Development Commands
+
+| Command | Description |
+|---------|-------------|
+| `make build-fuzz-sandbox` | Build the Podman worker image (`dcs-fuzz-python:latest`) |
+| `make test-fuzzer` | Run fuzzer unit tests |
+| `make test-integration` | Run integration tests (requires Podman + image) |
+
+Note: Podman (not Docker) is used for the fuzzer container backend. Run
+`make build-fuzz-sandbox` before running integration tests or using the
+`deep_scan_fuzz` MCP tool.
 
 ## Known Limitations (v1)
 
@@ -127,7 +142,6 @@ tests/               # pytest suite (90%+ coverage required)
 3. **PoC verification is bonus-only** -- most template PoCs fail due to missing execution context. This is expected.
 4. **No cross-language taint** -- Python calling C via FFI is not analyzed.
 5. **Fuzzer `_worker.py` uses `eval()`** -- justified deviation from CLAUDE.md eval() ban. Dual-layer AST validation (response_parser.py + _worker.py) with restricted globals provides defense in depth. See SD-02 in `plans/merge-fuzzy-wuzzy.md`.
-6. **`deep_scan_fuzz` MCP tool is deferred** -- blocked on container-based sandbox backend (SD-01). Only `deep_scan_fuzz_status` is active.
 
 ## File Conventions
 

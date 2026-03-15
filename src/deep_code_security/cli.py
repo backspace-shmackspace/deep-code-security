@@ -340,7 +340,7 @@ def status() -> None:
     auditor = AuditorOrchestrator(config=config)
 
     sandbox_available = auditor.sandbox.is_available()
-    runtime = auditor.sandbox._runtime_cmd or "none"
+    runtime = getattr(auditor.sandbox, "_runtime_cmd", None) or "none"
 
     registry_path = config.registry_path
     registries = []

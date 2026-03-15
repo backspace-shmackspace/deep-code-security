@@ -29,6 +29,9 @@ class _DummyPlugin(TargetPlugin):
     def validate_target(self, path: str) -> bool:
         return True
 
+    def set_backend(self, backend) -> None:
+        pass
+
 
 class TestPluginRegistry:
     def test_register_and_get(self) -> None:

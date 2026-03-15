@@ -1,33 +1,54 @@
-"""DeepCodeSecurityMCPServer — MCP server with 6 tools, path validation, and audit logging.
+"""DeepCodeSecurityMCPServer — MCP server with 6+ tools, path validation, and audit logging.
 
 Runs as a native stdio process. Never containerized. Invokes Docker/Podman CLI
-for sandbox containers (exploit verification).
+for sandbox containers (exploit verification and fuzzing).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from deep_code_security.architect.orchestrator import ArchitectOrchestrator
 from deep_code_security.auditor.orchestrator import AuditorOrchestrator
+from deep_code_security.fuzzer.execution.sandbox import ContainerBackend, select_backend
 from deep_code_security.hunter.models import RawFinding
 from deep_code_security.hunter.orchestrator import HunterOrchestrator
-from deep_code_security.mcp.input_validator import InputValidationError, validate_raw_finding
+from deep_code_security.mcp.input_validator import (
+    InputValidationError,
+    validate_function_name,
+    validate_raw_finding,
+)
 from deep_code_security.mcp.path_validator import PathValidationError, validate_path
 from deep_code_security.mcp.shared.server_base import BaseMCPServer, ToolError
 from deep_code_security.shared.config import Config, get_config
 from deep_code_security.shared.json_output import serialize_model, serialize_models
 
-__all__ = ["DeepCodeSecurityMCPServer"]
+__all__ = ["DeepCodeSecurityMCPServer", "FuzzRunState"]
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("deep_code_security.audit")
+
+_MAX_FUZZ_RUNS: int = 100
+_MAX_CONCURRENT_FUZZ_RUNS: int = 2
+
+
+@dataclass
+class FuzzRunState:
+    """Tracks the state of a single MCP-triggered fuzz run."""
+
+    run_id: str
+    status: str  # "running" | "completed" | "failed" | "timeout"
+    result: dict | None = field(default=None)
+    error: str | None = field(default=None)
+    started_at: float = field(default_factory=time.monotonic)
 
 
 class DeepCodeSecurityMCPServer(BaseMCPServer):
@@ -61,9 +82,47 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         # Maps finding_id -> RawFinding (for lookup by ID)
         self._finding_by_id: dict[str, RawFinding] = {}
 
+        # Fuzz run state store (bounded to _MAX_FUZZ_RUNS entries)
+        # Maps run_id -> FuzzRunState
+        self._fuzz_runs: dict[str, FuzzRunState] = {}
+
     async def initialize(self) -> None:
         """Initialize orchestrators and register tools."""
+        self._cleanup_orphan_containers()
         self._register_tools()
+
+    def _cleanup_orphan_containers(self) -> None:
+        """Remove any leftover fuzz containers from a previous server crash.
+
+        Finds containers labelled dcs.fuzz_run_id and force-removes them.
+        Silently skips if Podman is not available.
+        """
+        import subprocess as _sp
+
+        try:
+            result = _sp.run(
+                ["podman", "ps", "-aq", "--filter", "label=dcs.fuzz_run_id"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+            container_ids = result.stdout.strip().splitlines()
+            if container_ids:
+                logger.info(
+                    "Cleaning up %d orphan fuzz container(s): %s",
+                    len(container_ids),
+                    container_ids,
+                )
+                _sp.run(
+                    ["podman", "rm", "-f", *container_ids],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+        except Exception as exc:
+            logger.debug("Orphan container cleanup skipped: %s", exc)
 
     async def validate_services(self) -> None:
         """Check sandbox availability (non-blocking warning if unavailable)."""
@@ -78,7 +137,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             )
 
     def _register_tools(self) -> None:
-        """Register all 6 MCP tools (deep_scan_fuzz deferred)."""
+        """Register MCP tools. deep_scan_fuzz is registered only when ContainerBackend is available."""
         self.register_tool(
             name="deep_scan_hunt",
             description=(
@@ -249,25 +308,54 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             handler=self._handle_fuzz_status,
         )
 
-        # TODO: Register deep_scan_fuzz when container backend is implemented (see SD-01).
-        # The tool definition and handler stub (_handle_fuzz) are preserved below
-        # for implementation when the container backend is ready.
-        #
-        # deep_scan_fuzz input_schema:
-        # {
-        #     "type": "object",
-        #     "properties": {
-        #         "path": {"type": "string", "description": "Path to Python file/module to fuzz"},
-        #         "functions": {"type": "array", "items": {"type": "string"}},
-        #         "iterations": {"type": "integer", "default": 3},
-        #         "inputs_per_iteration": {"type": "integer", "default": 5},
-        #         "model": {"type": "string", "default": "claude-sonnet-4-6"},
-        #         "max_cost_usd": {"type": "number", "default": 2.00},
-        #         "timeout_ms": {"type": "integer", "default": 5000},
-        #         "consent": {"type": "boolean", "default": False},
-        #     },
-        #     "required": ["path", "consent"],
-        # }
+        # Register deep_scan_fuzz only when the ContainerBackend is available.
+        # This resolves SD-01: MCP-triggered fuzz runs require container isolation.
+        if ContainerBackend.is_available():
+            self.register_tool(
+                name="deep_scan_fuzz",
+                description=(
+                    "Run AI-powered fuzzing against a Python target file using the "
+                    "Podman container backend for safe sandboxed execution. "
+                    "Requires explicit consent=true (source code will be sent to the "
+                    "Anthropic API for input generation). Returns a fuzz_run_id that "
+                    "can be polled with deep_scan_fuzz_status."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "target_path": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path to the Python file to fuzz "
+                                "(must be in DCS_ALLOWED_PATHS)"
+                            ),
+                        },
+                        "functions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Specific function names to fuzz. "
+                                "If omitted, all discovered targets are fuzzed."
+                            ),
+                        },
+                        "consent": {
+                            "type": "boolean",
+                            "description": (
+                                "Must be true. Confirms that you consent to sending "
+                                "source code to the Anthropic API for fuzz input generation."
+                            ),
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "default": 3,
+                            "description": "Maximum fuzzing iterations (default: 3)",
+                        },
+                    },
+                    "required": ["target_path", "consent"],
+                },
+                handler=self._handle_fuzz,
+            )
+            logger.info("deep_scan_fuzz tool registered (ContainerBackend available)")
 
     async def _handle_hunt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle deep_scan_hunt tool call."""
@@ -630,8 +718,8 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         except Exception:
             available_plugins = []
 
-        # Container backend is not yet implemented
-        container_backend_available = False
+        # Dynamically check container backend availability
+        container_backend_available = ContainerBackend.is_available()
 
         result: dict[str, Any] = {
             "anthropic_available": anthropic_available,
@@ -641,13 +729,25 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             "container_backend_available": container_backend_available,
         }
 
-        # If fuzz_run_id is provided, return "not found" (no runs yet)
+        # If fuzz_run_id is provided, look it up in the run store
         if fuzz_run_id:
-            result["fuzz_run"] = {
-                "fuzz_run_id": fuzz_run_id,
-                "status": "not_found",
-                "message": "No fuzz run found with this ID.",
-            }
+            run_state = self._fuzz_runs.get(fuzz_run_id)
+            if run_state is None:
+                result["fuzz_run"] = {
+                    "fuzz_run_id": fuzz_run_id,
+                    "status": "not_found",
+                    "message": "No fuzz run found with this ID.",
+                }
+            else:
+                run_info: dict[str, Any] = {
+                    "fuzz_run_id": run_state.run_id,
+                    "status": run_state.status,
+                }
+                if run_state.error:
+                    run_info["error"] = run_state.error
+                if run_state.result:
+                    run_info["result"] = run_state.result
+                result["fuzz_run"] = run_info
 
         duration_ms = int((time.monotonic() - start) * 1000)
         self._audit_log(
@@ -668,17 +768,185 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         }
 
     async def _handle_fuzz(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Handle deep_scan_fuzz tool call (DEFERRED -- not registered).
+        """Handle deep_scan_fuzz tool call.
 
-        This method is a stub. It raises ToolError if called directly.
-        The tool will be registered when the container-based sandbox
-        backend is implemented (see SD-01).
+        Validates consent, path, and function names, then launches a background
+        thread that runs FuzzOrchestrator with ContainerBackend. Returns immediately
+        with a fuzz_run_id that can be polled via deep_scan_fuzz_status.
         """
-        raise ToolError(
-            "deep_scan_fuzz requires container-based sandboxing, "
-            "which is not yet implemented. Use the CLI 'dcs fuzz' command instead.",
-            retryable=False,
+        import os
+
+        # Consent check — must be explicitly True
+        consent = params.get("consent", False)
+        if not consent:
+            raise ToolError(
+                "deep_scan_fuzz requires explicit consent=true. "
+                "By passing consent=true you acknowledge that source code from the target "
+                "file will be transmitted to the Anthropic API for fuzz input generation.",
+                retryable=False,
+            )
+
+        # Validate target path
+        target_path_raw = params.get("target_path", "")
+        try:
+            target_path = validate_path(target_path_raw, self.config.allowed_paths_str)
+        except PathValidationError as e:
+            raise ToolError(f"Path validation failed: {e}", retryable=False) from e
+
+        # Validate function names
+        functions: list[str] = params.get("functions") or []
+        validated_functions: list[str] = []
+        for fn in functions:
+            try:
+                validated_functions.append(validate_function_name(fn))
+            except InputValidationError as e:
+                raise ToolError(
+                    f"Invalid function name {fn!r}: {e}", retryable=False
+                ) from e
+
+        max_iterations = int(params.get("max_iterations", 3))
+
+        # Enforce concurrent run limit before creating a new run state
+        active_count = sum(
+            1 for rs in self._fuzz_runs.values() if rs.status == "running"
         )
+        if active_count >= _MAX_CONCURRENT_FUZZ_RUNS:
+            raise ToolError(
+                f"Maximum concurrent fuzz runs ({_MAX_CONCURRENT_FUZZ_RUNS}) already active. "
+                "Try again later.",
+                retryable=False,
+            )
+
+        # Create run state and store it (evict oldest non-running entries when full)
+        run_id = str(uuid.uuid4())
+        run_state = FuzzRunState(run_id=run_id, status="running")
+        if len(self._fuzz_runs) >= _MAX_FUZZ_RUNS:
+            # Evict oldest completed/failed/timeout entry
+            evict_id = next(
+                (
+                    rid
+                    for rid, rs in self._fuzz_runs.items()
+                    if rs.status != "running"
+                ),
+                next(iter(self._fuzz_runs)),  # fallback: evict oldest
+            )
+            self._fuzz_runs.pop(evict_id, None)
+        self._fuzz_runs[run_id] = run_state
+
+        config = self.config
+
+        # Shared mutable container so the timer callback can reach the orchestrator
+        # after it is constructed inside the background thread.
+        orchestrator_ref: list[Any] = [None]
+
+        def _cancel_timeout() -> None:
+            """Timer callback: mark run as timed out and signal orchestrator to stop."""
+            if run_state.status == "running":
+                logger.warning(
+                    "Fuzz run %s exceeded MCP wall-clock timeout (%ds), marking as timeout",
+                    run_id,
+                    config.fuzz_mcp_timeout,
+                )
+                run_state.status = "timeout"
+                run_state.error = (
+                    f"Fuzz run exceeded the {config.fuzz_mcp_timeout}s wall-clock timeout."
+                )
+                orc = orchestrator_ref[0]
+                if orc is not None:
+                    orc._shutdown_requested = True
+
+        def _run_fuzz() -> None:
+            """Background thread: run fuzzing and update run_state."""
+            from deep_code_security.fuzzer.config import FuzzerConfig
+            from deep_code_security.fuzzer.orchestrator import FuzzOrchestrator
+
+            timer: threading.Timer | None = None
+            try:
+                backend = select_backend(require_container=True)
+
+                fuzz_config = FuzzerConfig(
+                    target_path=target_path,
+                    target_functions=validated_functions,
+                    model=config.fuzz_model,
+                    max_iterations=max_iterations,
+                    inputs_per_iteration=config.fuzz_inputs_per_iteration,
+                    timeout_ms=config.fuzz_timeout_ms,
+                    max_cost_usd=config.fuzz_max_cost_usd,
+                    output_dir=config.fuzz_output_dir,
+                    consent=True,  # already validated above
+                    use_vertex=config.fuzz_use_vertex,
+                    gcp_project=config.fuzz_gcp_project,
+                    gcp_region=config.fuzz_gcp_region,
+                    plugin_name="python",
+                    verbose=False,
+                )
+
+                orchestrator = FuzzOrchestrator(
+                    config=fuzz_config,
+                    install_signal_handlers=False,
+                    backend=backend,
+                )
+                # Publish the orchestrator reference so the timer callback can
+                # call orchestrator._shutdown_requested = True if needed.
+                orchestrator_ref[0] = orchestrator
+
+                # Start the wall-clock timeout timer now that the orchestrator
+                # reference is in place.
+                timer = threading.Timer(config.fuzz_mcp_timeout, _cancel_timeout)
+                timer.daemon = True
+                timer.start()
+
+                report = orchestrator.run()
+
+                run_state.status = "completed"
+                run_state.result = {
+                    "total_iterations": report.total_iterations,
+                    "total_executions": len(report.all_results),
+                    "crashes_found": len(report.crashes),
+                    "targets": [t.qualified_name for t in report.targets],
+                }
+
+            except Exception as exc:
+                logger.error("Fuzz run %s failed: %s", run_id, exc, exc_info=True)
+                run_state.status = "failed"
+                run_state.error = str(exc)
+
+            finally:
+                # Cancel the timer whether run completed normally or raised.
+                # This prevents a completed-run timer from firing and prevents
+                # the timer closure from holding references after exit.
+                if timer is not None:
+                    timer.cancel()
+
+        fuzz_thread = threading.Thread(target=_run_fuzz, daemon=True, name=f"fuzz-{run_id[:8]}")
+        fuzz_thread.start()
+
+        self._audit_log(
+            "deep_scan_fuzz",
+            {"target": Path(target_path).name, "max_iterations": max_iterations},
+            0,
+            "OK",
+            0,
+        )
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "fuzz_run_id": run_id,
+                            "status": "running",
+                            "message": (
+                                "Fuzz run started. Poll with deep_scan_fuzz_status "
+                                f"using fuzz_run_id={run_id!r}."
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ]
+        }
 
     def _lookup_findings(self, finding_ids: list[str]) -> list[RawFinding]:
         """Look up findings from the server-side session store.

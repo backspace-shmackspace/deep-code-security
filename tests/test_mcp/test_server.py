@@ -41,7 +41,19 @@ class TestToolRegistration:
     """Tests for tool registration."""
 
     def test_all_tools_registered(self, server: DeepCodeSecurityMCPServer) -> None:
-        """All 6 required tools are registered (deep_scan_fuzz deferred)."""
+        """The 6 always-present tools are registered.
+
+        deep_scan_fuzz may also be present if ContainerBackend is available,
+        but is not required.
+        """
+        from unittest.mock import patch
+        from deep_code_security.fuzzer.execution.sandbox import ContainerBackend
+
+        # Register tools with container unavailable so we get the deterministic baseline set
+        with patch.object(ContainerBackend, "is_available", return_value=False):
+            s = DeepCodeSecurityMCPServer(config=server.config)
+            s._register_tools()
+
         expected = {
             "deep_scan_hunt",
             "deep_scan_verify",
@@ -50,7 +62,7 @@ class TestToolRegistration:
             "deep_scan_status",
             "deep_scan_fuzz_status",
         }
-        assert set(server._tools.keys()) == expected
+        assert expected.issubset(set(s._tools.keys()))
 
     def test_each_tool_has_description(self, server: DeepCodeSecurityMCPServer) -> None:
         """Each tool has a non-empty description."""

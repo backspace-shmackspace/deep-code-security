@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from deep_code_security.fuzzer.analyzer.signature_extractor import extract_targets_from_path
 from deep_code_security.fuzzer.exceptions import ExecutionError, PluginError
@@ -82,6 +83,22 @@ class PythonTargetPlugin(TargetPlugin):
         elif p.is_dir():
             return any(p.rglob("*.py"))
         return False
+
+    def set_backend(self, backend: Any) -> None:
+        """Set the execution backend on the internal FuzzRunner's SandboxManager.
+
+        Called by FuzzOrchestrator when a specific backend is required (e.g.,
+        ContainerBackend for MCP-triggered runs). Replaces the default
+        SubprocessBackend on the runner's sandbox.
+
+        Args:
+            backend: An ExecutionBackend-compatible object.
+        """
+        self._runner._sandbox._backend = backend
+        logger.debug(
+            "PythonTargetPlugin: execution backend set to %s",
+            type(backend).__name__,
+        )
 
     def register_module_path(self, qualified_name: str, module_path: str) -> None:
         """Manually register a module path for a function (useful for testing)."""

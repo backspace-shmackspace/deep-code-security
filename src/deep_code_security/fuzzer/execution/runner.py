@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from deep_code_security.fuzzer.exceptions import ExecutionError
-from deep_code_security.fuzzer.execution.sandbox import SandboxManager
+from deep_code_security.fuzzer.execution.sandbox import ContainerBackend, SandboxManager
 from deep_code_security.fuzzer.models import FuzzInput, FuzzResult
 
 __all__ = ["FuzzRunner"]
@@ -51,9 +51,20 @@ class FuzzRunner:
         output_json = os.path.join(tmp_dir, "output.json")
         coverage_data_path = os.path.join(tmp_dir, ".coverage") if collect_coverage else ""
 
+        # Determine if we are using the ContainerBackend and translate paths accordingly.
+        using_container = isinstance(self._sandbox._backend, ContainerBackend)
+        resolved_module_path = str(Path(module_path).resolve())
+
+        if using_container:
+            # The container mounts only the single target file at /target/<basename>.
+            # Rewrite module_path in the JSON payload so the worker can find the file.
+            container_module_path = f"/target/{Path(resolved_module_path).name}"
+        else:
+            container_module_path = resolved_module_path
+
         try:
             params = {
-                "module_path": str(Path(module_path).resolve()),
+                "module_path": container_module_path,
                 "qualified_name": fuzz_input.target_function,
                 "args": list(fuzz_input.args),
                 "kwargs": dict(fuzz_input.kwargs),
@@ -63,14 +74,31 @@ class FuzzRunner:
             with open(input_json, "w") as f:
                 json.dump(params, f)
 
+            # cmd is used by SubprocessBackend. ContainerBackend ignores it and
+            # uses its fixed ENTRYPOINT instead (see ContainerBackend.run docstring).
             cmd = [self._python, "-m", WORKER_MODULE, input_json, output_json]
 
-            returncode, stdout, stderr = self._sandbox._backend.run(
-                cmd,
-                timeout_seconds=timeout_seconds,
-                cwd=tmp_dir,
-                env=self._build_env(module_path),
-            )
+            if using_container:
+                # Pass original host path as target_file kwarg so ContainerBackend
+                # can mount only that file into the container.
+                # env is passed but ContainerBackend ignores it (host env is isolated).
+                returncode, stdout, stderr = self._sandbox._backend.run(
+                    cmd,
+                    timeout_seconds,
+                    cwd=tmp_dir,
+                    env=self._build_env(module_path),
+                    target_file=resolved_module_path,
+                    input_json=input_json,
+                    output_json=output_json,
+                    ipc_dir=tmp_dir,
+                )
+            else:
+                returncode, stdout, stderr = self._sandbox._backend.run(
+                    cmd,
+                    timeout_seconds,
+                    cwd=tmp_dir,
+                    env=self._build_env(module_path),
+                )
 
             duration_ms = (time.monotonic() - start_time) * 1000.0
 
@@ -89,6 +117,13 @@ class FuzzRunner:
                     )
 
             if os.path.exists(output_json):
+                # Security: reject symlinks and oversized output files before reading.
+                output_path = Path(output_json)
+                if output_path.is_symlink():
+                    raise ExecutionError("output.json is a symlink -- rejected")
+                if output_path.stat().st_size > 10 * 1024 * 1024:
+                    raise ExecutionError("output.json exceeds 10 MB size limit -- rejected")
+
                 try:
                     with open(output_json) as f:
                         result_data = json.load(f)

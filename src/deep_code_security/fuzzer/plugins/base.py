@@ -9,6 +9,7 @@ Third-party plugins can implement TargetPlugin and register via entry points:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from deep_code_security.fuzzer.models import FuzzInput, FuzzResult, TargetInfo
 
@@ -50,4 +51,19 @@ class TargetPlugin(ABC):
     @abstractmethod
     def validate_target(self, path: str) -> bool:
         """Check if the given path is a valid target for this plugin."""
+        ...
+
+    @abstractmethod
+    def set_backend(self, backend: Any) -> None:
+        """Set the execution backend for this plugin.
+
+        Called by FuzzOrchestrator when a specific backend (e.g. ContainerBackend)
+        is required. Implementations should pass the backend down to their internal
+        FuzzRunner / SandboxManager.
+
+        Args:
+            backend: An ExecutionBackend-compatible object (SubprocessBackend or
+                ContainerBackend). Typed as Any to avoid a circular import cycle
+                between plugins and execution modules.
+        """
         ...
