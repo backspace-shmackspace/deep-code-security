@@ -79,7 +79,8 @@ pip install -e ".[dev]"
 pip install -e ".[dev,fuzz]"
 
 # Build sandbox images (requires Docker or Podman)
-make build-sandboxes
+make build-sandboxes        # Build auditor/architect sandbox images
+make build-fuzz-sandbox     # Build fuzzer sandbox image (Podman only)
 ```
 
 ## MCP Configuration
@@ -138,6 +139,7 @@ For advanced tuning, additional variables are available:
 | `DCS_FUZZ_GCP_REGION` | `us-east5` | GCP region for Vertex AI |
 | `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugins |
 | `DCS_FUZZ_MCP_TIMEOUT` | `120` | Hard wall-clock timeout for MCP fuzz invocations |
+| `DCS_FUZZ_CONTAINER_IMAGE` | `dcs-fuzz-python:latest` | Podman image used by ContainerBackend for MCP fuzz runs |
 
 ## MCP Tools
 
@@ -148,6 +150,7 @@ For advanced tuning, additional variables are available:
 | `deep_scan_remediate` | Run Architect phase (remediation guidance) |
 | `deep_scan_full` | Run all three phases sequentially |
 | `deep_scan_status` | Check sandbox health and registry info |
+| `deep_scan_fuzz` | Run AI-powered fuzzing (requires Podman container backend) |
 | `deep_scan_fuzz_status` | Check fuzzer availability and configuration |
 
 ## Confidence Scoring
@@ -212,11 +215,19 @@ See `registries/README.md` for the YAML registry format documentation.
 
 6. **Fuzzer requires optional dependencies** — dynamic analysis requires `pip install -e ".[fuzz]"` to install the `anthropic` SDK and related packages. The fuzzer will not be available without these dependencies.
 
-7. **`deep_scan_fuzz` MCP tool is deferred** — blocked on container-based sandbox backend. Only `deep_scan_fuzz_status` is active. CLI fuzzing uses rlimits-only sandboxing.
+7. **`deep_scan_fuzz` MCP tool requires Podman** — The MCP fuzzing tool uses
+   ContainerBackend for full isolation and is only available when Podman is
+   installed and the `dcs-fuzz-python:latest` image is built via
+   `make build-fuzz-sandbox`. CLI fuzzing supports both SubprocessBackend
+   (rlimits-only) and ContainerBackend.
 
 ## Security Model
 
-The MCP server runs as a **native stdio process** on the host. It does NOT run inside a Docker container, avoiding the Docker socket mount attack vector. Docker/Podman is only used for sandbox containers that execute exploit PoCs.
+The MCP server runs as a **native stdio process** on the host. It does NOT run
+inside a Docker container, avoiding the Docker socket mount attack vector.
+Docker or Podman is used for sandbox containers that execute exploit PoCs
+(auditor/architect phases). The fuzzer's ContainerBackend uses Podman
+exclusively for rootless container execution.
 
 All file access goes through `DCS_ALLOWED_PATHS` allowlist validation with symlink resolution. All RawFinding fields are validated before exploit template interpolation. Finding provenance is verified via server-side session store (external callers cannot inject arbitrary findings).
 
