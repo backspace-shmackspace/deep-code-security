@@ -26,6 +26,9 @@ dcs corpus /path/to/corpus
 dcs fuzz-plugins
 dcs report /path/to/output
 
+# Integrated SAST-to-Fuzz pipeline
+dcs hunt-fuzz /path/to/project
+
 # Run via MCP server
 python -m deep_code_security.mcp
 ```
@@ -120,6 +123,7 @@ For advanced tuning, additional variables are available:
 | `DCS_MAX_CONCURRENT_SANDBOXES` | `2` | Concurrency limit for sandbox execution |
 | `DCS_QUERY_TIMEOUT` | `5.0` | Tree-sitter query timeout in seconds |
 | `DCS_QUERY_MAX_RESULTS` | `1000` | Max results per tree-sitter query |
+| `DCS_BRIDGE_MAX_TARGETS` | `10` | Max fuzz targets produced by SAST-to-Fuzz bridge |
 
 **Dynamic Analysis (Fuzzing)**:
 
@@ -151,6 +155,7 @@ For advanced tuning, additional variables are available:
 | `deep_scan_full` | Run all three phases sequentially |
 | `deep_scan_status` | Check sandbox health and registry info |
 | `deep_scan_fuzz` | Run AI-powered fuzzing (requires Podman container backend) |
+| `deep_scan_hunt_fuzz` | Run SAST analysis followed by AI-powered fuzzing of identified vulnerable functions (requires Podman + consent) |
 | `deep_scan_fuzz_status` | Check fuzzer availability and configuration |
 
 ## Confidence Scoring
