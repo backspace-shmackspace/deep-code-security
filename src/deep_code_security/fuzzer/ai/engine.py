@@ -19,11 +19,14 @@ try:
 except ImportError:
     anthropic = None  # type: ignore[assignment]
 
+from typing import TYPE_CHECKING
+
 from deep_code_security.fuzzer.ai.context_manager import ContextManager
 from deep_code_security.fuzzer.ai.prompts import (
     SYSTEM_PROMPT,
     build_initial_prompt,
     build_refinement_prompt,
+    build_sast_enriched_prompt,
 )
 from deep_code_security.fuzzer.ai.response_parser import parse_ai_response
 from deep_code_security.fuzzer.exceptions import (
@@ -32,6 +35,9 @@ from deep_code_security.fuzzer.exceptions import (
     InputValidationError,
 )
 from deep_code_security.fuzzer.models import FuzzInput, FuzzResult, TargetInfo
+
+if TYPE_CHECKING:
+    from deep_code_security.bridge.models import SASTContext
 
 __all__ = ["AIEngine", "APIUsage"]
 
@@ -148,6 +154,33 @@ class AIEngine:
         valid_targets = {t.qualified_name for t in targets}
         prompt = build_initial_prompt(targets, count, redact_strings=self.redact_strings)
 
+        return self._call_with_retry(prompt, valid_targets)
+
+    def generate_sast_guided_inputs(
+        self,
+        targets: list[TargetInfo],
+        sast_contexts: dict[str, "SASTContext"],
+        count: int = 10,
+    ) -> list[FuzzInput]:
+        """Generate initial inputs guided by SAST analysis context.
+
+        Uses build_sast_enriched_prompt() instead of build_initial_prompt().
+        SAST context is injected on iteration 1 only; subsequent iterations
+        use the standard coverage-guided refinement prompt.
+
+        Args:
+            targets: Fuzz targets to generate inputs for.
+            sast_contexts: Dict keyed by qualified_name -> SASTContext.
+            count: Number of inputs to generate.
+
+        Returns:
+            List of FuzzInput objects.
+        """
+        self._check_cost_budget()
+        valid_targets = {t.qualified_name for t in targets}
+        prompt = build_sast_enriched_prompt(
+            targets, sast_contexts, count, redact_strings=self.redact_strings
+        )
         return self._call_with_retry(prompt, valid_targets)
 
     def refine_inputs(

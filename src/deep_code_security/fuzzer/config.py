@@ -15,6 +15,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
+from deep_code_security.bridge.models import SASTContext
+
 __all__ = ["FuzzerConfig"]
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,17 @@ class FuzzerConfig(BaseModel):
 
     # Corpus
     seed_corpus_path: str | None = None
+
+    # SAST context (bridge internal -- not CLI-configurable)
+    sast_contexts: dict[str, SASTContext] | None = Field(
+        default=None,
+        exclude=True,
+        description=(
+            "SAST context per function (keyed by qualified name). "
+            "Bridge internal -- not CLI-configurable. "
+            "Injected programmatically by the BridgeOrchestrator."
+        ),
+    )
 
     @model_validator(mode="after")
     def _post_init_validation(self) -> FuzzerConfig:

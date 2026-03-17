@@ -115,6 +115,8 @@ omit = [
     "*/architect/impact_analyzer.py",
     # Fuzzer execution worker runs in isolated subprocess (tested via test_worker_validation)
     "*/fuzzer/execution/_worker.py",
+    # Bridge __init__.py is a pure re-export
+    "*/bridge/__init__.py",
     # Fuzzer __init__.py files are re-exports only
     "*/fuzzer/__init__.py",
     "*/fuzzer/ai/__init__.py",

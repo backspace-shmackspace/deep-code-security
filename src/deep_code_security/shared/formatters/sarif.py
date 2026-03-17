@@ -12,6 +12,7 @@ from typing import Any
 from deep_code_security.shared.formatters.protocol import (
     FullScanResult,
     FuzzReportResult,
+    HuntFuzzResult,
     HuntResult,
     ReplayResultDTO,
 )
@@ -331,6 +332,147 @@ class SarifFormatter:
             results.append(sarif_result)
 
         sarif = self._build_fuzz_sarif_envelope(results, rules, target_path)
+        return json.dumps(sarif, indent=2, ensure_ascii=False)
+
+    def format_hunt_fuzz(self, data: HuntFuzzResult, target_path: str = "") -> str:
+        """Format hunt-fuzz pipeline results as SARIF 2.1.0.
+
+        Produces two separate run entries: one for SAST findings (Hunter output)
+        and one for fuzz crash results. This allows SARIF consumers to process
+        both result types independently.
+        """
+        # Run 1: SAST findings
+        sast_results = [_build_result(f, target_path) for f in data.hunt_result.findings]
+        sast_rules = _build_rules(data.hunt_result.findings)
+
+        sast_run: dict[str, Any] = {
+            "tool": {
+                "driver": {
+                    "name": _TOOL_NAME,
+                    "version": _get_tool_version(),
+                    "informationUri": "https://github.com/deep-code-security/deep-code-security",
+                    "rules": sast_rules,
+                },
+            },
+            "results": sast_results,
+            "taxonomies": [
+                {
+                    "name": "CWE",
+                    "version": "4.13",
+                    "informationUri": "https://cwe.mitre.org/",
+                    "isComprehensive": False,
+                }
+            ],
+        }
+        if target_path:
+            sast_run["originalUriBaseIds"] = {
+                "SRCROOT": {
+                    "uri": Path(target_path).as_uri() + "/",
+                }
+            }
+
+        # Run 2: Fuzz results (if available)
+        fuzz_results_list: list[dict[str, Any]] = []
+        fuzz_rules_list: list[dict[str, Any]] = []
+
+        if data.fuzz_result:
+            project_root = str(Path(target_path).parent) if target_path else ""
+            for idx, uc in enumerate(data.fuzz_result.unique_crashes, 1):
+                rule_id = f"FW/{uc.exception_type}/{idx:03d}"
+                exc_desc = uc.exception_type
+                if uc.exception_message:
+                    exc_desc = f"{uc.exception_type}: {uc.exception_message}"
+
+                rule = {
+                    "id": rule_id,
+                    "name": f"UnhandledException/{uc.exception_type}",
+                    "shortDescription": {
+                        "text": (
+                            f"Unhandled {uc.exception_type} in "
+                            f"{uc.representative.target_function}"
+                        )
+                    },
+                    "fullDescription": {
+                        "text": (
+                            f"deep-code-security fuzzer discovered an unhandled {exc_desc} "
+                            f"in function '{uc.representative.target_function}' "
+                            f"with args {uc.representative.args}."
+                        )
+                    },
+                    "defaultConfiguration": {"level": "error"},
+                    "properties": {"tags": ["security", "fuzzing", "hunt-fuzz"]},
+                }
+                fuzz_rules_list.append(rule)
+
+                fingerprint = hashlib.sha256(uc.signature.encode()).hexdigest()
+                level = "warning" if uc.representative.timed_out else "error"
+
+                locations: list[dict[str, Any]] = []
+                if uc.location:
+                    m = re.search(r'File "([^"]+)", line (\d+)', uc.location)
+                    if m:
+                        uri = _make_sarif_uri(m.group(1), project_root)
+                        locations.append({
+                            "physicalLocation": {
+                                "artifactLocation": {
+                                    "uri": uri,
+                                    "uriBaseId": "%SRCROOT%",
+                                },
+                                "region": {"startLine": int(m.group(2))},
+                            }
+                        })
+
+                if not locations and target_path:
+                    target_uri = _make_sarif_uri(target_path, project_root)
+                    locations.append({
+                        "physicalLocation": {
+                            "artifactLocation": {
+                                "uri": target_uri,
+                                "uriBaseId": "%SRCROOT%",
+                            },
+                            "region": {"startLine": 1},
+                        }
+                    })
+
+                fuzz_results_list.append({
+                    "ruleId": rule_id,
+                    "ruleIndex": idx - 1,
+                    "level": level,
+                    "message": {
+                        "text": (
+                            f"{exc_desc} raised by "
+                            f"'{uc.representative.target_function}' "
+                            f"with args {uc.representative.args}. "
+                            f"Crash count: {uc.count}."
+                        )
+                    },
+                    "locations": locations,
+                    "fingerprints": {
+                        "fuzzyWuzzyCrashSignature/v1": fingerprint,
+                    },
+                    "properties": {
+                        "analysis_mode": "hybrid",
+                    },
+                })
+
+        fuzz_run: dict[str, Any] = {
+            "tool": {
+                "driver": {
+                    "name": _TOOL_NAME,
+                    "version": _get_tool_version(),
+                    "informationUri": "https://github.com/deep-code-security/deep-code-security",
+                    "rules": fuzz_rules_list,
+                },
+            },
+            "invocations": [{"executionSuccessful": True}],
+            "results": fuzz_results_list,
+        }
+
+        sarif = {
+            "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [sast_run, fuzz_run],
+        }
         return json.dumps(sarif, indent=2, ensure_ascii=False)
 
     def format_replay(self, data: ReplayResultDTO, target_path: str = "") -> str:

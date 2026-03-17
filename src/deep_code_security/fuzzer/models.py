@@ -83,6 +83,9 @@ class TargetInfo(BaseModel):
     complexity: int = 0
     is_static_method: bool = False
     has_side_effects: bool = False
+    lineno: int | None = None
+    end_lineno: int | None = None
+    is_instance_method: bool = False
 
 
 class UniqueCrash(BaseModel):

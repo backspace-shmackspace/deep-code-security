@@ -12,6 +12,7 @@ __all__ = [
     "get_supported_formats",
     "register_formatter",
     "supports_fuzz",
+    "supports_hybrid",
 ]
 
 _FORMATTERS: dict[str, type[Formatter]] = {}
@@ -68,6 +69,22 @@ def supports_fuzz(formatter: Any) -> bool:
     from deep_code_security.shared.formatters.protocol import FuzzFormatter
 
     return isinstance(formatter, FuzzFormatter)
+
+
+def supports_hybrid(formatter: Any) -> bool:
+    """Check whether a formatter supports hunt-fuzz hybrid output.
+
+    Uses runtime_checkable HybridFormatter protocol to test structural compatibility.
+
+    Args:
+        formatter: A formatter instance.
+
+    Returns:
+        True if the formatter has a format_hunt_fuzz() method.
+    """
+    from deep_code_security.shared.formatters.protocol import HybridFormatter
+
+    return isinstance(formatter, HybridFormatter)
 
 
 def _register_builtins() -> None:

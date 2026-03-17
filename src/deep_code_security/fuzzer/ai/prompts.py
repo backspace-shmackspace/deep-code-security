@@ -6,12 +6,18 @@ The system prompt explicitly instructs Claude to treat source code as data only.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from deep_code_security.fuzzer.models import TargetInfo
+
+if TYPE_CHECKING:
+    from deep_code_security.bridge.models import SASTContext
 
 __all__ = [
     "SYSTEM_PROMPT",
     "build_initial_prompt",
     "build_refinement_prompt",
+    "build_sast_enriched_prompt",
 ]
 
 SYSTEM_PROMPT = """You are an expert security researcher and software tester specializing in finding bugs through fuzzing.
@@ -159,6 +165,99 @@ Valid target function names: {[t.qualified_name for t in targets]}
 
 Generate {count} inputs specifically targeting the UNCOVERED regions above.
 Avoid repeating patterns that have already been tried.
+Return ONLY the JSON object."""
+
+
+def build_sast_enriched_prompt(
+    targets: list[TargetInfo],
+    sast_contexts: dict[str, "SASTContext"],
+    count: int,
+    redact_strings: bool = False,
+) -> str:
+    """Build an initial prompt enriched with SAST taint analysis context.
+
+    When the SAST pipeline has identified vulnerability patterns in the
+    target functions, this information is included in the prompt to guide
+    the AI toward generating inputs that exercise those specific patterns.
+
+    The SAST context is placed OUTSIDE the <target_source_code> delimiters
+    because it is trusted analysis output, not untrusted user code.
+
+    The prompt includes an explicit diversity directive: after generating
+    SAST-guided inputs, the AI is instructed to also generate inputs that
+    are completely unrelated to the identified vulnerability pattern to
+    maintain coverage breadth.
+
+    Args:
+        targets: List of TargetInfo for functions to fuzz.
+        sast_contexts: Dict keyed by qualified_name -> SASTContext.
+        count: Number of inputs to generate.
+        redact_strings: If True, redact string literals in source code.
+
+    Returns:
+        Prompt string for the AI.
+    """
+    from deep_code_security.bridge.cwe_guidance import get_guidance_for_cwes
+
+    target_descriptions = []
+    for target in targets:
+        source = target.source_code
+        if redact_strings:
+            source = _redact_string_literals(source)
+
+        params_desc = ", ".join(
+            f"{p['name']}: {p['type_hint'] or 'Any'}"
+            + (f" = {p['default']}" if p["default"] else "")
+            for p in target.parameters
+        )
+
+        ctx = sast_contexts.get(target.qualified_name)
+        sast_block = ""
+        if ctx and (ctx.cwe_ids or ctx.sink_functions or ctx.vulnerability_classes):
+            cwe_str = ", ".join(ctx.cwe_ids) if ctx.cwe_ids else "unknown"
+            sinks_str = ", ".join(ctx.sink_functions) if ctx.sink_functions else "unknown"
+            sources_str = ", ".join(ctx.source_categories) if ctx.source_categories else "unknown"
+            guidance_str = get_guidance_for_cwes(ctx.cwe_ids)
+
+            sast_block = f"""
+SAST Analysis (trusted -- from static analysis):
+  Vulnerabilities found: {cwe_str}
+  Dangerous sinks: {sinks_str}
+  Input sources: {sources_str}
+  Severity: {ctx.severity}
+  Guidance: Generate inputs that would exploit these specific vulnerability patterns."""
+            if guidance_str:
+                sast_block += f"\n{guidance_str}"
+
+            sast_block += """
+
+IMPORTANT: After generating SAST-guided inputs targeting the vulnerability
+patterns above, also generate 3 inputs that are completely unrelated to
+the identified vulnerability pattern. These should exercise different code
+paths, edge cases (empty strings, very long inputs, Unicode, None, type
+mismatches), and unexpected input shapes to maintain coverage breadth."""
+
+        desc = f"""Function: {target.qualified_name}
+Signature: {target.signature}
+Parameters: {params_desc or "none"}
+Docstring: {target.docstring or "none"}
+Complexity: {target.complexity}{sast_block}
+<target_source_code>
+{source}
+</target_source_code>"""
+        target_descriptions.append(desc)
+
+    targets_block = "\n\n---\n\n".join(target_descriptions)
+
+    return f"""Generate {count} adversarial test inputs for the following Python function(s).
+Focus on inputs that exercise the SAST-identified vulnerability patterns AND broader edge cases.
+
+Target functions (VALID values for "target_function" field):
+{[t.qualified_name for t in targets]}
+
+{targets_block}
+
+Generate exactly {count} diverse inputs targeting both the identified vulnerability patterns and additional edge cases.
 Return ONLY the JSON object."""
 
 

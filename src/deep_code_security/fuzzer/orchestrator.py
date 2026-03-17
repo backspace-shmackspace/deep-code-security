@@ -52,6 +52,8 @@ class FuzzOrchestrator:
         self._backend = backend
         self._shutdown_requested = False
         self._partial_results: list[FuzzResult] = []
+        # SAST contexts injected by BridgeOrchestrator (iteration 1 only)
+        self._sast_contexts: Any | None = config.sast_contexts
         if install_signal_handlers:
             self._setup_signal_handlers()
 
@@ -176,7 +178,13 @@ class FuzzOrchestrator:
                 logger.info("=== Iteration %d/%d ===", iteration, config.max_iterations)
 
                 try:
-                    if iteration == 1:
+                    if iteration == 1 and self._sast_contexts:
+                        inputs = ai_engine.generate_sast_guided_inputs(
+                            targets=targets,
+                            sast_contexts=self._sast_contexts,
+                            count=config.inputs_per_iteration,
+                        )
+                    elif iteration == 1:
                         inputs = ai_engine.generate_initial_inputs(
                             targets=targets,
                             count=config.inputs_per_iteration,

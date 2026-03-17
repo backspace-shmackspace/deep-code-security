@@ -21,6 +21,7 @@ src/deep_code_security/
     hunter/          # Phase 1: tree-sitter parse -> taint track -> RawFinding[]
     auditor/         # Phase 2: exploit generation -> sandbox exec -> VerifiedFinding[]
     architect/       # Phase 3: context gather -> guidance -> RemediationGuidance[]
+    bridge/          # SAST-to-Fuzz bridge: RawFinding[] -> FuzzTarget[], CorrelationReport
     fuzzer/          # Dynamic analysis: AI-powered fuzzer
         ai/          # Claude API integration, prompt templates, response parsing
         execution/   # Sandboxed subprocess execution, _worker.py
@@ -30,7 +31,7 @@ src/deep_code_security/
         plugins/     # Language-specific target plugins (Python MVP)
         reporting/   # Crash deduplication
         replay/      # Re-execute saved crash inputs
-    mcp/             # MCP server (BaseMCPServer, 6 tools always + deep_scan_fuzz when Podman available, stdio transport)
+    mcp/             # MCP server (BaseMCPServer, 6 tools always + deep_scan_fuzz and deep_scan_hunt_fuzz when Podman available, stdio transport)
         shared/      # Vendored from helper-mcps (BaseMCPServer base class)
 registries/          # YAML source/sink definitions per language
 sandbox/             # Docker images for exploit execution
@@ -60,7 +61,7 @@ tests/               # pytest suite (90%+ coverage required)
 
 ### Testing
 - Run tests: `make test` (90%+ coverage required)
-- Per-component: `make test-hunter`, `make test-auditor`, `make test-architect`, `make test-mcp`, `make test-fuzzer`
+- Per-component: `make test-hunter`, `make test-auditor`, `make test-architect`, `make test-mcp`, `make test-fuzzer`, `make test-bridge`
 - Integration: `make test-integration` (requires Docker/Podman)
 - Lint: `make lint`
 - Security scan: `make sast`
@@ -88,6 +89,7 @@ tests/               # pytest suite (90%+ coverage required)
 | `dcs verify` | Auditor phase (requires prior hunt) |
 | `dcs status` | Server health + fuzzer availability |
 | `dcs fuzz <target>` | Run AI-powered fuzzer |
+| `dcs hunt-fuzz <path>` | Hunt then fuzz: SAST -> bridge -> fuzz -> correlation report |
 | `dcs replay <corpus_dir>` | Re-execute saved crash inputs |
 | `dcs corpus <corpus_dir>` | Inspect corpus contents |
 | `dcs fuzz-plugins` | List available fuzzer plugins |
@@ -122,6 +124,7 @@ tests/               # pytest suite (90%+ coverage required)
 | `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugin names |
 | `DCS_FUZZ_MCP_TIMEOUT` | `120` | Hard wall-clock timeout for MCP fuzz invocations |
 | `DCS_FUZZ_CONTAINER_IMAGE` | `dcs-fuzz-python:latest` | Podman image used by ContainerBackend for MCP fuzz runs |
+| `DCS_BRIDGE_MAX_TARGETS` | `10` | Max fuzz targets produced by the SAST-to-Fuzz bridge |
 
 ## Development Commands
 

@@ -23,6 +23,7 @@ from deep_code_security.hunter.models import RawFinding
 from deep_code_security.hunter.orchestrator import HunterOrchestrator
 from deep_code_security.mcp.input_validator import (
     InputValidationError,
+    validate_crash_data,
     validate_function_name,
     validate_raw_finding,
 )
@@ -49,6 +50,9 @@ class FuzzRunState:
     result: dict | None = field(default=None)
     error: str | None = field(default=None)
     started_at: float = field(default_factory=time.monotonic)
+    # Hunt-fuzz pipeline extras (populated for deep_scan_hunt_fuzz runs only)
+    bridge_result: dict | None = field(default=None)
+    correlation_result: dict | None = field(default=None)
 
 
 class DeepCodeSecurityMCPServer(BaseMCPServer):
@@ -356,6 +360,75 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 handler=self._handle_fuzz,
             )
             logger.info("deep_scan_fuzz tool registered (ContainerBackend available)")
+
+            # Check Anthropic SDK availability for hunt-fuzz
+            _anthropic_available = False
+            try:
+                import anthropic as _anthro  # noqa: F401
+                _anthropic_available = True
+            except ImportError:
+                pass
+
+            if _anthropic_available:
+                self.register_tool(
+                    name="deep_scan_hunt_fuzz",
+                    description=(
+                        "Run SAST analysis followed by AI-powered fuzzing of the vulnerable "
+                        "functions identified. Requires consent=true (source code will be "
+                        "sent to the Anthropic API for input generation). Returns a "
+                        "fuzz_run_id that can be polled with deep_scan_fuzz_status."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": (
+                                    "Absolute path to target codebase "
+                                    "(must be in DCS_ALLOWED_PATHS)"
+                                ),
+                            },
+                            "languages": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Filter to specific languages (python, go, c)",
+                            },
+                            "severity_threshold": {
+                                "type": "string",
+                                "enum": ["critical", "high", "medium", "low"],
+                                "description": "Minimum severity to report (default: medium)",
+                            },
+                            "consent": {
+                                "type": "boolean",
+                                "description": (
+                                    "Must be true. Confirms consent to send source code "
+                                    "to the Anthropic API for fuzz input generation."
+                                ),
+                            },
+                            "max_iterations": {
+                                "type": "integer",
+                                "default": 5,
+                                "description": "Maximum fuzzing iterations (default: 5)",
+                            },
+                            "max_findings": {
+                                "type": "integer",
+                                "default": 100,
+                                "description": "Maximum SAST findings to process",
+                            },
+                            "max_fuzz_targets": {
+                                "type": "integer",
+                                "default": 10,
+                                "description": "Maximum fuzz targets from bridge (default: 10)",
+                            },
+                        },
+                        "required": ["path", "consent"],
+                    },
+                    handler=self._handle_hunt_fuzz,
+                )
+                logger.info(
+                    "deep_scan_hunt_fuzz tool registered "
+                    "(ContainerBackend + Anthropic SDK available)"
+                )
 
     async def _handle_hunt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle deep_scan_hunt tool call."""
@@ -747,6 +820,10 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                     run_info["error"] = run_state.error
                 if run_state.result:
                     run_info["result"] = run_state.result
+                if run_state.bridge_result:
+                    run_info["bridge_result"] = run_state.bridge_result
+                if run_state.correlation_result:
+                    run_info["correlation_result"] = run_state.correlation_result
                 result["fuzz_run"] = run_info
 
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -939,6 +1016,302 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                             "status": "running",
                             "message": (
                                 "Fuzz run started. Poll with deep_scan_fuzz_status "
+                                f"using fuzz_run_id={run_id!r}."
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ]
+        }
+
+    async def _handle_hunt_fuzz(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle deep_scan_hunt_fuzz tool call.
+
+        Validates consent and path, runs Hunter synchronously, runs bridge resolver
+        synchronously, then launches fuzzing in a background thread (same pattern as
+        _handle_fuzz). Returns immediately with a fuzz_run_id for polling.
+        """
+        import os
+
+        # Consent check -- must be explicitly True
+        consent = params.get("consent", False)
+        if not consent:
+            raise ToolError(
+                "deep_scan_hunt_fuzz requires explicit consent=true. "
+                "By passing consent=true you acknowledge that source code from the target "
+                "codebase will be transmitted to the Anthropic API for fuzz input generation.",
+                retryable=False,
+            )
+
+        # Validate path
+        path_raw = params.get("path", "")
+        try:
+            path = validate_path(path_raw, self.config.allowed_paths_str)
+        except PathValidationError as e:
+            raise ToolError(f"Path validation failed: {e}", retryable=False) from e
+
+        languages = params.get("languages")
+        severity_threshold = params.get("severity_threshold", "medium")
+        max_findings = min(int(params.get("max_findings", 100)), 1000)
+        max_fuzz_targets = min(max(1, int(params.get("max_fuzz_targets", 10))), 100)
+        max_iterations = int(params.get("max_iterations", 5))
+
+        # Enforce concurrent run limit
+        active_count = sum(
+            1 for rs in self._fuzz_runs.values() if rs.status == "running"
+        )
+        if active_count >= _MAX_CONCURRENT_FUZZ_RUNS:
+            raise ToolError(
+                f"Maximum concurrent fuzz runs ({_MAX_CONCURRENT_FUZZ_RUNS}) already active. "
+                "Try again later.",
+                retryable=False,
+            )
+
+        # Phase 1: Hunt (synchronous -- fast)
+        try:
+            findings, hunt_stats, total_count, has_more = self.hunter.scan(
+                target_path=path,
+                languages=languages,
+                severity_threshold=severity_threshold,
+                max_results=max_findings,
+                offset=0,
+            )
+        except Exception as e:
+            logger.error("Hunt phase failed in hunt_fuzz: %s", e)
+            raise ToolError(f"Hunt phase failed: {e}", retryable=True) from e
+
+        # Store findings in session
+        scan_id = str(uuid.uuid4())
+        if len(self._findings_session) >= self._MAX_SESSION_SCANS:
+            _, evicted_findings = self._findings_session.popitem(last=False)
+            for ef in evicted_findings:
+                self._finding_by_id.pop(ef.id, None)
+        self._findings_session[scan_id] = findings
+        for f in findings:
+            self._finding_by_id[f.id] = f
+
+        # Phase 2: Bridge (synchronous -- fast)
+        from deep_code_security.bridge.models import BridgeConfig
+        from deep_code_security.bridge.orchestrator import BridgeOrchestrator
+
+        bridge_config = BridgeConfig(max_targets=max_fuzz_targets)
+        bridge_orc = BridgeOrchestrator()
+        bridge_result = bridge_orc.run_bridge(findings, config=bridge_config)
+        fuzz_targets = bridge_result.fuzz_targets
+
+        bridge_summary = {
+            "total_findings": bridge_result.total_findings,
+            "fuzz_targets_count": len(fuzz_targets),
+            "skipped_findings": bridge_result.skipped_findings,
+            "not_directly_fuzzable": bridge_result.not_directly_fuzzable,
+            "targets": [
+                {
+                    "function_name": t.function_name,
+                    "file_path": t.file_path,
+                    "requires_instance": t.requires_instance,
+                    "severity": t.sast_context.severity,
+                }
+                for t in fuzz_targets
+            ],
+        }
+
+        if not fuzz_targets:
+            # No fuzz targets -- return immediately with diagnostics
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "status": "no_fuzz_targets",
+                                "message": (
+                                    "No fuzz targets found. Findings may be in route handlers "
+                                    "that require framework harnesses. "
+                                    f"not_directly_fuzzable={bridge_result.not_directly_fuzzable}"
+                                ),
+                                "hunt_summary": {
+                                    "total_findings": total_count,
+                                    "scan_id": scan_id,
+                                },
+                                "bridge_summary": bridge_summary,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                ]
+            }
+
+        # Create run state
+        run_id = str(uuid.uuid4())
+        run_state = FuzzRunState(run_id=run_id, status="running")
+        if len(self._fuzz_runs) >= _MAX_FUZZ_RUNS:
+            evict_id = next(
+                (
+                    rid
+                    for rid, rs in self._fuzz_runs.items()
+                    if rs.status != "running"
+                ),
+                next(iter(self._fuzz_runs)),
+            )
+            self._fuzz_runs.pop(evict_id, None)
+        self._fuzz_runs[run_id] = run_state
+
+        config = self.config
+        orchestrator_ref: list[Any] = [None]
+
+        def _cancel_timeout_hf() -> None:
+            if run_state.status == "running":
+                logger.warning(
+                    "Hunt-fuzz run %s exceeded MCP wall-clock timeout (%ds)",
+                    run_id,
+                    config.fuzz_mcp_timeout,
+                )
+                run_state.status = "timeout"
+                run_state.error = (
+                    f"Fuzz run exceeded the {config.fuzz_mcp_timeout}s wall-clock timeout."
+                )
+                orc = orchestrator_ref[0]
+                if orc is not None:
+                    orc._shutdown_requested = True
+
+        # Capture loop-local values for the thread closure
+        _fuzz_targets = list(fuzz_targets)
+        _bridge_result = bridge_result
+        _bridge_orc = bridge_orc
+
+        def _run_hunt_fuzz() -> None:
+            from deep_code_security.fuzzer.config import FuzzerConfig
+            from deep_code_security.fuzzer.orchestrator import FuzzOrchestrator
+            from deep_code_security.fuzzer.execution.sandbox import select_backend
+
+            timer: threading.Timer | None = None
+            try:
+                backend = select_backend(require_container=True)
+
+                sast_contexts = {t.function_name: t.sast_context for t in _fuzz_targets}
+                target_functions = [t.function_name for t in _fuzz_targets]
+                fuzz_target_path = str(path)
+
+                fuzz_config = FuzzerConfig(
+                    target_path=fuzz_target_path,
+                    target_functions=target_functions,
+                    model=config.fuzz_model,
+                    max_iterations=max_iterations,
+                    inputs_per_iteration=config.fuzz_inputs_per_iteration,
+                    timeout_ms=config.fuzz_timeout_ms,
+                    max_cost_usd=config.fuzz_max_cost_usd,
+                    output_dir=config.fuzz_output_dir,
+                    consent=True,
+                    use_vertex=config.fuzz_use_vertex,
+                    gcp_project=config.fuzz_gcp_project,
+                    gcp_region=config.fuzz_gcp_region,
+                    plugin_name="python",
+                    verbose=False,
+                )
+                fuzz_config.sast_contexts = sast_contexts  # type: ignore[assignment]
+
+                orchestrator = FuzzOrchestrator(
+                    config=fuzz_config,
+                    install_signal_handlers=False,
+                    backend=backend,
+                )
+                orchestrator_ref[0] = orchestrator
+
+                timer = threading.Timer(config.fuzz_mcp_timeout, _cancel_timeout_hf)
+                timer.daemon = True
+                timer.start()
+
+                fuzz_report = orchestrator.run()
+
+                # Correlate
+                correlation = _bridge_orc.correlate(_bridge_result, fuzz_report)
+
+                # Sanitize crash signatures before storing in run state
+                sanitized_entries = []
+                for entry in correlation.entries:
+                    sanitized_sigs: list[str] = []
+                    for sig in entry.crash_signatures:
+                        try:
+                            validated = validate_crash_data(
+                                exception=sig,
+                                traceback_str=None,
+                                target_function=entry.target_function,
+                            )
+                            safe_sig = validated.get("exception") or sig[:2048]
+                        except Exception:
+                            safe_sig = sig[:2048]
+                        sanitized_sigs.append(safe_sig)
+                    sanitized_entries.append({
+                        "finding_id": entry.finding_id,
+                        "vulnerability_class": entry.vulnerability_class,
+                        "severity": entry.severity,
+                        "sink_function": entry.sink_function,
+                        "target_function": entry.target_function,
+                        "crash_in_finding_scope": entry.crash_in_finding_scope,
+                        "crash_count": entry.crash_count,
+                        "crash_signatures": sanitized_sigs,
+                    })
+
+                run_state.correlation_result = {
+                    "total_sast_findings": correlation.total_sast_findings,
+                    "crash_in_scope_count": correlation.crash_in_scope_count,
+                    "fuzz_targets_count": correlation.fuzz_targets_count,
+                    "total_crashes": correlation.total_crashes,
+                    "entries": sanitized_entries,
+                }
+                run_state.bridge_result = bridge_summary
+                run_state.status = "completed"
+                run_state.result = {
+                    "total_iterations": fuzz_report.total_iterations,
+                    "total_executions": len(fuzz_report.all_results),
+                    "crashes_found": len(fuzz_report.crashes),
+                    "targets": [t.qualified_name for t in fuzz_report.targets],
+                }
+
+            except Exception as exc:
+                logger.error("Hunt-fuzz run %s failed: %s", run_id, exc, exc_info=True)
+                run_state.status = "failed"
+                run_state.error = str(exc)
+
+            finally:
+                if timer is not None:
+                    timer.cancel()
+
+        hf_thread = threading.Thread(
+            target=_run_hunt_fuzz,
+            daemon=True,
+            name=f"hunt-fuzz-{run_id[:8]}",
+        )
+        hf_thread.start()
+
+        self._audit_log(
+            "deep_scan_hunt_fuzz",
+            {
+                "path": Path(path).name,
+                "max_iterations": max_iterations,
+                "fuzz_targets": len(fuzz_targets),
+            },
+            len(findings),
+            "OK",
+            0,
+        )
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "fuzz_run_id": run_id,
+                            "status": "running",
+                            "hunt_summary": {
+                                "total_findings": total_count,
+                                "scan_id": scan_id,
+                            },
+                            "bridge_summary": bridge_summary,
+                            "message": (
+                                "Hunt-fuzz run started. Poll with deep_scan_fuzz_status "
                                 f"using fuzz_run_id={run_id!r}."
                             ),
                         },

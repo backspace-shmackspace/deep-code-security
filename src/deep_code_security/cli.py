@@ -21,7 +21,7 @@ from deep_code_security.auditor.orchestrator import AuditorOrchestrator
 from deep_code_security.hunter.orchestrator import HunterOrchestrator
 from deep_code_security.mcp.path_validator import PathValidationError, validate_path
 from deep_code_security.shared.config import get_config
-from deep_code_security.shared.formatters import get_formatter, supports_fuzz
+from deep_code_security.shared.formatters import get_formatter, supports_fuzz, supports_hybrid
 from deep_code_security.shared.formatters.protocol import FullScanResult, HuntResult
 
 
@@ -669,6 +669,222 @@ def report(output_dir: str, output_format: str | None) -> None:
 
     content = report_file.read_text(encoding="utf-8")
     click.echo(content)
+
+
+@cli.command("hunt-fuzz")
+@click.argument("path")
+@click.option(
+    "--language", "-l", multiple=True,
+    help="Filter to specific language (python, go, c). Repeat for multiple.",
+)
+@click.option(
+    "--severity", default="medium",
+    type=click.Choice(["critical", "high", "medium", "low"]),
+    help="Minimum severity threshold (default: medium).",
+)
+@click.option("--max-findings", default=100, help="Maximum findings per page.")
+@click.option(
+    "--max-fuzz-targets", default=10, type=int,
+    help="Max fuzz targets (default: 10, env: DCS_BRIDGE_MAX_TARGETS).",
+)
+@click.option("--iterations", "-n", default=5, help="Maximum fuzzing iterations.")
+@click.option("--inputs-per-iter", default=10, help="Inputs per iteration.")
+@click.option("--timeout", default=5000, metavar="MS", help="Per-input timeout in ms.")
+@click.option("--model", default="claude-sonnet-4-6", help="Claude model to use.")
+@click.option("--output-dir", default="./fuzzy-output", metavar="PATH", help="Output directory.")
+@click.option(
+    "--format", "-f", "output_format",
+    type=click.Choice(["text", "json", "sarif"]),
+    default="text",
+    help="Output format (default: text).",
+)
+@click.option(
+    "--output-file", "-o", default=None, metavar="PATH",
+    help="Write output to file.",
+)
+@click.option("--force", is_flag=True, default=False, help="Overwrite existing output file.")
+@click.option("--max-cost", default=5.00, metavar="USD", help="API cost budget.")
+@click.option("--consent", "consent_flag", is_flag=True, help="Consent to API transmission.")
+@click.option("--dry-run", is_flag=True, help="Preview what would be sent.")
+@click.option("--verbose", is_flag=True, help="Verbose output.")
+def hunt_fuzz(
+    path: str,
+    language: tuple[str, ...],
+    severity: str,
+    max_findings: int,
+    max_fuzz_targets: int,
+    iterations: int,
+    inputs_per_iter: int,
+    timeout: int,
+    model: str,
+    output_dir: str,
+    output_format: str,
+    output_file: str | None,
+    force: bool,
+    max_cost: float,
+    consent_flag: bool,
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """Run SAST analysis then fuzz the identified vulnerable functions."""
+    config = get_config()
+
+    # Validate target path
+    try:
+        validated_path = validate_path(path, config.allowed_paths_str)
+    except PathValidationError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Validate output directory (write-path protection)
+    _validate_write_path(output_dir)
+
+    # Validate max_fuzz_targets
+    max_fuzz_targets = max(1, min(100, max_fuzz_targets))
+
+    # Check formatter support
+    formatter = get_formatter(output_format)
+    if not supports_hybrid(formatter):
+        click.echo(
+            f"Error: Formatter '{output_format}' does not support hunt-fuzz output.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Phase 1: Hunt
+    hunter = HunterOrchestrator(config=config)
+    click.echo(f"[1/3] Scanning {validated_path}...", err=True)
+
+    findings, hunt_stats, total_count, has_more = hunter.scan(
+        target_path=validated_path,
+        languages=list(language) if language else None,
+        severity_threshold=severity,
+        max_results=max_findings,
+        offset=0,
+    )
+    click.echo(
+        f"  Found {total_count} findings in {hunt_stats.files_scanned} files",
+        err=True,
+    )
+
+    from deep_code_security.shared.formatters.protocol import HuntResult
+
+    hunt_result = HuntResult(
+        findings=findings,
+        stats=hunt_stats,
+        total_count=total_count,
+        has_more=has_more,
+    )
+
+    # Phase 2: Bridge
+    click.echo("[2/3] Resolving fuzz targets from SAST findings...", err=True)
+
+    from deep_code_security.bridge.models import BridgeConfig
+    from deep_code_security.bridge.orchestrator import BridgeOrchestrator
+
+    bridge_config = BridgeConfig(max_targets=max_fuzz_targets)
+    bridge_orc = BridgeOrchestrator()
+    bridge_result = bridge_orc.run_bridge(findings, config=bridge_config)
+
+    fuzz_targets = bridge_result.fuzz_targets
+    instance_targets = [t for t in fuzz_targets if t.requires_instance]
+
+    click.echo(
+        f"  {total_count} findings -> {len(fuzz_targets)} fuzz targets "
+        f"({bridge_result.skipped_findings} skipped, "
+        f"{bridge_result.not_directly_fuzzable} not directly fuzzable)",
+        err=True,
+    )
+
+    if instance_targets:
+        click.echo(
+            f"  Warning: {len(instance_targets)} target(s) are instance methods and "
+            "may require a manual harness for full coverage.",
+            err=True,
+        )
+
+    if not fuzz_targets:
+        click.echo(
+            "  No fuzz targets found. "
+            "Findings may be in route handlers that require framework harnesses.",
+            err=True,
+        )
+        # Output bridge diagnostics only
+        from deep_code_security.shared.formatters.protocol import HuntFuzzResult
+
+        result_dto = HuntFuzzResult(
+            hunt_result=hunt_result,
+            bridge_result=bridge_result,
+            fuzz_result=None,
+            correlation=None,
+        )
+        output = formatter.format_hunt_fuzz(result_dto, target_path=validated_path)
+        _write_output(output, output_file, force, config.allowed_paths_str)
+        return
+
+    # Phase 3: Fuzz
+    click.echo(
+        f"[3/3] Fuzzing {len(fuzz_targets)} function(s)...",
+        err=True,
+    )
+
+    from deep_code_security.fuzzer.config import FuzzerConfig
+    from deep_code_security.fuzzer.orchestrator import FuzzOrchestrator
+
+    # Build sast_contexts mapping for prompt enrichment
+    sast_contexts = {t.function_name: t.sast_context for t in fuzz_targets}
+    target_functions = [t.function_name for t in fuzz_targets]
+    # Use the file path of the first target for the fuzzer target path (may be multi-file)
+    fuzz_target_path = fuzz_targets[0].file_path if fuzz_targets else validated_path
+
+    fuzzer_config = FuzzerConfig.from_dcs_config(
+        config,
+        target_path=fuzz_target_path,
+        target_functions=target_functions,
+        max_iterations=iterations,
+        inputs_per_iteration=inputs_per_iter,
+        timeout_ms=timeout,
+        model=model,
+        output_dir=output_dir,
+        max_cost_usd=max_cost,
+        consent=consent_flag or config.fuzz_consent,
+        dry_run=dry_run,
+        verbose=verbose,
+        plugin_name="python",
+        report_format=output_format,
+    )
+    # Inject SAST contexts for iteration-1 prompt enrichment
+    fuzzer_config.sast_contexts = sast_contexts  # type: ignore[assignment]
+
+    orchestrator = FuzzOrchestrator(
+        config=fuzzer_config,
+        install_signal_handlers=True,
+    )
+
+    try:
+        fuzz_report = orchestrator.run()
+    except Exception as e:
+        click.echo(f"Error during fuzzing: {e}", err=True)
+        sys.exit(1)
+
+    # Correlate
+    correlation = bridge_orc.correlate(bridge_result, fuzz_report)
+
+    # Build FuzzReportResult DTO
+    fuzz_result_dto = _build_fuzz_report_result(fuzz_report, fuzzer_config)
+    fuzz_result_dto.analysis_mode = "hybrid"
+
+    from deep_code_security.shared.formatters.protocol import HuntFuzzResult
+
+    result_dto = HuntFuzzResult(
+        hunt_result=hunt_result,
+        bridge_result=bridge_result,
+        fuzz_result=fuzz_result_dto,
+        correlation=correlation,
+    )
+
+    output = formatter.format_hunt_fuzz(result_dto, target_path=validated_path)
+    _write_output(output, output_file, force, config.allowed_paths_str)
 
 
 def _build_fuzz_report_result(

@@ -2,7 +2,52 @@
 
 from __future__ import annotations
 
+import pytest
+
 from deep_code_security.shared.formatters.text import TextFormatter
+
+
+@pytest.fixture
+def sample_bridge_result():
+    """Minimal BridgeResult for testing format_hunt_fuzz."""
+    from deep_code_security.bridge.models import BridgeResult, FuzzTarget, SASTContext
+
+    sast_ctx = SASTContext(
+        cwe_ids=["CWE-78"],
+        vulnerability_classes=["CWE-78: OS Command Injection"],
+        sink_functions=["os.system"],
+        source_categories=["web_input"],
+        severity="high",
+        finding_count=1,
+    )
+    target = FuzzTarget(
+        file_path="/tmp/project/app.py",
+        function_name="process_cmd",
+        sast_context=sast_ctx,
+        finding_ids=["test-finding-001"],
+        requires_instance=False,
+        parameter_count=1,
+    )
+    return BridgeResult(
+        fuzz_targets=[target],
+        skipped_findings=0,
+        skipped_reasons=[],
+        total_findings=1,
+        not_directly_fuzzable=0,
+    )
+
+
+@pytest.fixture
+def sample_hunt_fuzz_result(sample_hunt_result, sample_bridge_result):
+    """Minimal HuntFuzzResult for testing format_hunt_fuzz."""
+    from deep_code_security.shared.formatters.protocol import HuntFuzzResult
+
+    return HuntFuzzResult(
+        hunt_result=sample_hunt_result,
+        bridge_result=sample_bridge_result,
+        fuzz_result=None,
+        correlation=None,
+    )
 
 
 class TestTextFormatterHunt:
@@ -57,3 +102,107 @@ class TestTextFormatterFullScan:
         output = fmt.format_full_scan(result)
         assert "Total findings: 1" in output
         assert "Confirmed: 0" in output
+
+
+class TestTextFormatterHuntFuzz:
+    def test_format_hunt_fuzz_contains_header(self, sample_hunt_fuzz_result):
+        fmt = TextFormatter()
+        output = fmt.format_hunt_fuzz(sample_hunt_fuzz_result)
+        assert "HUNT+FUZZ" in output
+
+    def test_format_hunt_fuzz_sast_section(self, sample_hunt_fuzz_result):
+        fmt = TextFormatter()
+        output = fmt.format_hunt_fuzz(sample_hunt_fuzz_result)
+        assert "SAST Results" in output
+        assert "findings" in output.lower()
+
+    def test_format_hunt_fuzz_bridge_section(self, sample_hunt_fuzz_result):
+        fmt = TextFormatter()
+        output = fmt.format_hunt_fuzz(sample_hunt_fuzz_result)
+        assert "Bridge Analysis" in output
+        assert "process_cmd" in output
+        assert "Fuzz targets found" in output
+
+    def test_format_hunt_fuzz_no_fuzz_result(self, sample_hunt_fuzz_result):
+        """When fuzz_result is None, fuzz section is absent."""
+        fmt = TextFormatter()
+        output = fmt.format_hunt_fuzz(sample_hunt_fuzz_result)
+        assert "Fuzz Results" not in output
+
+    def test_format_hunt_fuzz_with_correlation(self, sample_hunt_result, sample_bridge_result):
+        from deep_code_security.bridge.models import (
+            CorrelationEntry,
+            CorrelationReport,
+        )
+        from deep_code_security.shared.formatters.protocol import HuntFuzzResult
+
+        entry = CorrelationEntry(
+            finding_id="f1",
+            vulnerability_class="CWE-78: OS Command Injection",
+            severity="high",
+            sink_function="os.system",
+            target_function="process_cmd",
+            crash_in_finding_scope=True,
+            crash_count=1,
+            crash_signatures=["ZeroDivisionError"],
+        )
+        correlation = CorrelationReport(
+            entries=[entry],
+            total_sast_findings=1,
+            crash_in_scope_count=1,
+            fuzz_targets_count=1,
+            total_crashes=1,
+        )
+        result = HuntFuzzResult(
+            hunt_result=sample_hunt_result,
+            bridge_result=sample_bridge_result,
+            fuzz_result=None,
+            correlation=correlation,
+        )
+        fmt = TextFormatter()
+        output = fmt.format_hunt_fuzz(result)
+        assert "Correlation" in output
+        assert "CRASH IN SCOPE" in output
+        assert "process_cmd" in output
+
+    def test_format_hunt_fuzz_with_fuzz_result(self, sample_hunt_result, sample_bridge_result):
+        from deep_code_security.shared.formatters.protocol import (
+            FuzzCrashSummary,
+            FuzzConfigSummary,
+            FuzzReportResult,
+            FuzzTargetInfo,
+            HuntFuzzResult,
+            UniqueCrashSummary,
+        )
+
+        crash = FuzzCrashSummary(
+            target_function="process_cmd",
+            exception="ZeroDivisionError: division by zero",
+        )
+        unique_crash = UniqueCrashSummary(
+            signature="ZeroDivisionError|process_cmd",
+            exception_type="ZeroDivisionError",
+            exception_message="division by zero",
+            count=1,
+            target_functions=["process_cmd"],
+            representative=crash,
+        )
+        fuzz_result = FuzzReportResult(
+            targets=[],
+            crashes=[crash],
+            unique_crashes=[unique_crash],
+            total_inputs=5,
+            crash_count=1,
+            unique_crash_count=1,
+            total_iterations=1,
+        )
+        result = HuntFuzzResult(
+            hunt_result=sample_hunt_result,
+            bridge_result=sample_bridge_result,
+            fuzz_result=fuzz_result,
+            correlation=None,
+        )
+        fmt = TextFormatter()
+        output = fmt.format_hunt_fuzz(result)
+        assert "Fuzz Results" in output
+        assert "ZeroDivisionError" in output

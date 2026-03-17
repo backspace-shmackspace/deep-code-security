@@ -8,6 +8,7 @@ from pathlib import Path
 from deep_code_security.shared.formatters.protocol import (
     FullScanResult,
     FuzzReportResult,
+    HuntFuzzResult,
     HuntResult,
     ReplayResultDTO,
 )
@@ -117,6 +118,82 @@ class TextFormatter:
 
         lines.append("=" * 60)
 
+        return "\n".join(lines)
+
+    def format_hunt_fuzz(self, data: HuntFuzzResult, target_path: str = "") -> str:
+        """Format combined hunt-fuzz pipeline results as human-readable text."""
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append("DEEP-CODE-SECURITY HUNT+FUZZ REPORT")
+        lines.append("=" * 60)
+        lines.append("")
+
+        # SAST section
+        lines.append("--- SAST Results ---")
+        lines.append(
+            f"Scanned {data.hunt_result.stats.files_scanned} files, "
+            f"found {data.hunt_result.total_count} findings "
+            f"({data.hunt_result.stats.scan_duration_ms}ms)"
+        )
+        for f in data.hunt_result.findings:
+            lines.append(
+                f"  [{f.severity.upper()}] {f.vulnerability_class} "
+                f"in {Path(f.source.file).name}:{f.source.line} -> "
+                f"{Path(f.sink.file).name}:{f.sink.line}"
+            )
+        lines.append("")
+
+        # Bridge section
+        br = data.bridge_result
+        lines.append("--- Bridge Analysis ---")
+        lines.append(f"Total findings:         {br.total_findings}")
+        lines.append(f"Fuzz targets found:     {len(br.fuzz_targets)}")
+        lines.append(f"Not directly fuzzable:  {br.not_directly_fuzzable}")
+        lines.append(f"Skipped findings:       {br.skipped_findings}")
+        if br.fuzz_targets:
+            for t in br.fuzz_targets:
+                instance_note = " [requires instance]" if t.requires_instance else ""
+                lines.append(
+                    f"  Target: {t.function_name}{instance_note} "
+                    f"({t.sast_context.severity}, {t.parameter_count} fuzzable params)"
+                )
+        lines.append("")
+
+        # Fuzz section
+        if data.fuzz_result:
+            fr = data.fuzz_result
+            lines.append("--- Fuzz Results ---")
+            lines.append(f"Iterations:    {fr.total_iterations}")
+            lines.append(f"Inputs run:    {fr.total_inputs}")
+            lines.append(f"Crashes found: {fr.crash_count}")
+            lines.append(f"Unique bugs:   {fr.unique_crash_count}")
+            if fr.unique_crashes:
+                for uc in fr.unique_crashes:
+                    lines.append(
+                        f"  [{uc.exception_type}] in {uc.representative.target_function}"
+                    )
+            lines.append("")
+
+        # Correlation section
+        if data.correlation:
+            corr = data.correlation
+            lines.append("--- Correlation ---")
+            lines.append(
+                f"Findings with crash activity in same scope: "
+                f"{corr.crash_in_scope_count}/{corr.total_sast_findings}"
+            )
+            for entry in corr.entries:
+                if entry.crash_in_finding_scope:
+                    lines.append(
+                        f"  CRASH IN SCOPE: {entry.target_function} "
+                        f"({entry.vulnerability_class}) -- {entry.crash_count} crash(es)"
+                    )
+                    lines.append(
+                        "    Note: crash does not confirm SAST vulnerability exploitation."
+                    )
+            lines.append("")
+
+        lines.append("=" * 60)
         return "\n".join(lines)
 
     def format_replay(self, data: ReplayResultDTO, target_path: str = "") -> str:

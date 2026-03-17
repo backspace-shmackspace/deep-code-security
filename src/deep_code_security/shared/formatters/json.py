@@ -7,6 +7,7 @@ import json
 from deep_code_security.shared.formatters.protocol import (
     FullScanResult,
     FuzzReportResult,
+    HuntFuzzResult,
     HuntResult,
     ReplayResultDTO,
 )
@@ -68,6 +69,94 @@ class JsonFormatter:
                 "estimated_cost_usd": data.api_cost_usd,
             } if data.api_cost_usd is not None else None,
             "analysis_mode": data.analysis_mode,
+        }
+        return json.dumps(output, indent=2, ensure_ascii=False)
+
+    def format_hunt_fuzz(self, data: HuntFuzzResult, target_path: str = "") -> str:
+        """Format hunt-fuzz pipeline results as JSON."""
+        br = data.bridge_result
+
+        bridge_out = {
+            "total_findings": br.total_findings,
+            "fuzz_targets": [
+                {
+                    "file_path": t.file_path,
+                    "function_name": t.function_name,
+                    "requires_instance": t.requires_instance,
+                    "parameter_count": t.parameter_count,
+                    "finding_ids": t.finding_ids,
+                    "sast_context": {
+                        "cwe_ids": t.sast_context.cwe_ids,
+                        "vulnerability_classes": t.sast_context.vulnerability_classes,
+                        "sink_functions": t.sast_context.sink_functions,
+                        "source_categories": t.sast_context.source_categories,
+                        "severity": t.sast_context.severity,
+                        "finding_count": t.sast_context.finding_count,
+                    },
+                }
+                for t in br.fuzz_targets
+            ],
+            "skipped_findings": br.skipped_findings,
+            "not_directly_fuzzable": br.not_directly_fuzzable,
+            "skipped_reasons": br.skipped_reasons,
+        }
+
+        fuzz_out = None
+        if data.fuzz_result:
+            fr = data.fuzz_result
+            fuzz_out = {
+                "schema_version": 2,
+                "timestamp": fr.timestamp,
+                "config": serialize_model(fr.config_summary),
+                "summary": {
+                    "total_targets": len(fr.targets),
+                    "total_iterations": fr.total_iterations,
+                    "total_inputs": fr.total_inputs,
+                    "crash_count": fr.crash_count,
+                    "unique_crash_count": fr.unique_crash_count,
+                    "timeout_count": fr.timeout_count,
+                },
+                "targets": [serialize_model(t) for t in fr.targets],
+                "crashes": [serialize_model(c) for c in fr.crashes],
+                "unique_crashes": [serialize_model(uc) for uc in fr.unique_crashes],
+                "analysis_mode": fr.analysis_mode,
+            }
+
+        correlation_out = None
+        if data.correlation:
+            corr = data.correlation
+            correlation_out = {
+                "total_sast_findings": corr.total_sast_findings,
+                "crash_in_scope_count": corr.crash_in_scope_count,
+                "fuzz_targets_count": corr.fuzz_targets_count,
+                "total_crashes": corr.total_crashes,
+                "entries": [
+                    {
+                        "finding_id": e.finding_id,
+                        "vulnerability_class": e.vulnerability_class,
+                        "severity": e.severity,
+                        "sink_function": e.sink_function,
+                        "target_function": e.target_function,
+                        "crash_in_finding_scope": e.crash_in_finding_scope,
+                        "crash_count": e.crash_count,
+                        "crash_signatures": e.crash_signatures,
+                    }
+                    for e in corr.entries
+                ],
+            }
+
+        output = {
+            "schema_version": 1,
+            "analysis_mode": data.analysis_mode,
+            "hunt_result": {
+                "findings": serialize_models(data.hunt_result.findings),
+                "stats": serialize_model(data.hunt_result.stats),
+                "total_count": data.hunt_result.total_count,
+                "has_more": data.hunt_result.has_more,
+            },
+            "bridge_result": bridge_out,
+            "fuzz_result": fuzz_out,
+            "correlation": correlation_out,
         }
         return json.dumps(output, indent=2, ensure_ascii=False)
 

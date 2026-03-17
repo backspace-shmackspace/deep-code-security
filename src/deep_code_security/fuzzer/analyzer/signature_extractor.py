@@ -178,8 +178,19 @@ def extract_targets_from_source(
     source: str,
     module_path: str,
     allow_side_effects: bool = False,
+    include_instance_methods: bool = False,
 ) -> list[TargetInfo]:
-    """Extract fuzzable targets from Python source code."""
+    """Extract fuzzable targets from Python source code.
+
+    Args:
+        source: Python source code string.
+        module_path: Path to the source file (for logging).
+        allow_side_effects: If True, include functions with detected side effects.
+        include_instance_methods: If True, include instance methods and classmethods
+            with is_instance_method=True set on the returned TargetInfo. When False
+            (default), instance methods and classmethods are skipped with warning logs,
+            preserving existing behavior for the fuzzer's normal discovery path.
+    """
     try:
         tree = parse_source(source, module_path)
     except SyntaxError as e:
@@ -196,6 +207,7 @@ def extract_targets_from_source(
                 class_name=None,
                 source=source,
                 allow_side_effects=allow_side_effects,
+                is_instance_method=False,
             )
             if target is not None:
                 targets.append(target)
@@ -204,21 +216,36 @@ def extract_targets_from_source(
             class_name = node.name
             for class_node in ast.iter_child_nodes(node):
                 if isinstance(class_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if _is_instance_method(class_node, is_in_class=True):
-                        logger.warning(
-                            "Skipping instance method %s.%s in %s (not supported in MVP)",
-                            class_name,
-                            class_node.name,
-                            module_path,
-                        )
-                        continue
-                    if _is_class_method(class_node):
-                        logger.warning(
-                            "Skipping classmethod %s.%s in %s (not supported in MVP)",
-                            class_name,
-                            class_node.name,
-                            module_path,
-                        )
+                    is_inst = _is_instance_method(class_node, is_in_class=True)
+                    is_cls = _is_class_method(class_node)
+                    if is_inst or is_cls:
+                        if include_instance_methods:
+                            target = _make_target_info(
+                                class_node,
+                                module_path=module_path,
+                                class_name=class_name,
+                                source=source,
+                                allow_side_effects=allow_side_effects,
+                                is_instance_method=True,
+                            )
+                            if target is not None:
+                                targets.append(target)
+                        else:
+                            if is_inst:
+                                logger.warning(
+                                    "Skipping instance method %s.%s in %s"
+                                    " (not supported in MVP)",
+                                    class_name,
+                                    class_node.name,
+                                    module_path,
+                                )
+                            else:
+                                logger.warning(
+                                    "Skipping classmethod %s.%s in %s (not supported in MVP)",
+                                    class_name,
+                                    class_node.name,
+                                    module_path,
+                                )
                         continue
                     target = _make_target_info(
                         class_node,
@@ -226,6 +253,7 @@ def extract_targets_from_source(
                         class_name=class_name,
                         source=source,
                         allow_side_effects=allow_side_effects,
+                        is_instance_method=False,
                     )
                     if target is not None:
                         targets.append(target)
@@ -239,6 +267,7 @@ def _make_target_info(
     class_name: str | None,
     source: str,
     allow_side_effects: bool,
+    is_instance_method: bool = False,
 ) -> TargetInfo | None:
     func_name = func_node.name
 
@@ -277,6 +306,9 @@ def _make_target_info(
 
     complexity = _estimate_complexity(func_node)
 
+    lineno: int | None = getattr(func_node, "lineno", None)
+    end_lineno: int | None = getattr(func_node, "end_lineno", None)
+
     return TargetInfo(
         module_path=module_path,
         function_name=func_name,
@@ -289,16 +321,32 @@ def _make_target_info(
         complexity=complexity,
         is_static_method=is_static,
         has_side_effects=has_side_effects,
+        lineno=lineno,
+        end_lineno=end_lineno,
+        is_instance_method=is_instance_method,
     )
 
 
 def extract_targets_from_file(
     path: str | Path,
     allow_side_effects: bool = False,
+    include_instance_methods: bool = False,
 ) -> list[TargetInfo]:
+    """Extract fuzzable targets from a Python file.
+
+    Args:
+        path: Path to the Python file.
+        allow_side_effects: If True, include functions with detected side effects.
+        include_instance_methods: If True, include instance methods and classmethods.
+    """
     path = Path(path)
     source = read_source_file(path)
-    return extract_targets_from_source(source, str(path), allow_side_effects=allow_side_effects)
+    return extract_targets_from_source(
+        source,
+        str(path),
+        allow_side_effects=allow_side_effects,
+        include_instance_methods=include_instance_methods,
+    )
 
 
 def extract_targets_from_path(

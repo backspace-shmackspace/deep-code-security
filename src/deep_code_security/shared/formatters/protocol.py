@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from deep_code_security.architect.models import RemediateStats, RemediationGuidance
 from deep_code_security.auditor.models import VerifiedFinding, VerifyStats
+from deep_code_security.bridge.models import BridgeResult, CorrelationReport
 from deep_code_security.hunter.models import RawFinding, ScanStats
 
 __all__ = [
@@ -18,10 +19,13 @@ __all__ = [
     "FuzzReportResult",
     "FuzzTargetInfo",
     "FullScanResult",
+    "HuntFuzzResult",
     "HuntResult",
+    "HybridFormatter",
     "ReplayResultDTO",
     "ReplayResultEntry",
     "UniqueCrashSummary",
+    "supports_hybrid",
 ]
 
 
@@ -137,6 +141,18 @@ class ReplayResultDTO(BaseModel):
 # ---------- Protocols ----------
 
 
+class HuntFuzzResult(BaseModel):
+    """Results from the hunt-fuzz combined pipeline."""
+
+    hunt_result: HuntResult
+    bridge_result: "BridgeResult"
+    fuzz_result: FuzzReportResult | None = None
+    correlation: "CorrelationReport | None" = None
+    analysis_mode: str = "hybrid"
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
 class Formatter(Protocol):
     """Protocol for output formatters.
 
@@ -175,3 +191,35 @@ class FuzzFormatter(Protocol):
     def format_replay(self, data: ReplayResultDTO, target_path: str = "") -> str:
         """Format replay results."""
         ...
+
+
+@runtime_checkable
+class HybridFormatter(Protocol):
+    """Protocol for formatters that support the combined hunt-fuzz output.
+
+    This is a separate protocol from FuzzFormatter to avoid breaking
+    backward compatibility. Adding format_hunt_fuzz() to FuzzFormatter
+    would cause existing formatters that implement only format_fuzz()
+    and format_replay() to fail isinstance(formatter, FuzzFormatter)
+    checks, breaking dcs fuzz --format html and dcs replay --format html.
+
+    This follows the same separation principle used when FuzzFormatter
+    was created as a separate protocol from Formatter in the
+    merge-fuzzy-wuzzy plan.
+    """
+
+    def format_hunt_fuzz(self, data: HuntFuzzResult, target_path: str = "") -> str:
+        """Format combined hunt-fuzz pipeline results."""
+        ...
+
+
+def supports_hybrid(formatter: object) -> bool:
+    """Check if a formatter supports hunt-fuzz combined output.
+
+    Args:
+        formatter: A formatter instance.
+
+    Returns:
+        True if the formatter has a format_hunt_fuzz() method.
+    """
+    return isinstance(formatter, HybridFormatter)
