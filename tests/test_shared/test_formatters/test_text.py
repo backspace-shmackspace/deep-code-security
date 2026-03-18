@@ -80,6 +80,38 @@ class TestTextFormatterHunt:
         output = fmt.format_hunt(result)
         assert "more" in output.lower()
 
+    def test_text_format_hunt_with_suppressions(self, sample_finding, sample_stats):
+        """Suppression count appears in summary line when suppressions active."""
+        from deep_code_security.shared.formatters.protocol import HuntResult, SuppressionSummary
+
+        ss = SuppressionSummary(
+            suppressed_count=3,
+            total_rules=5,
+            expired_rules=1,
+            suppression_reasons={"f1": "Admin paths", "f2": "Generated code", "f3": "Admin paths"},
+            suppression_file="/project/.dcs-suppress.yaml",
+        )
+        result = HuntResult(
+            findings=[sample_finding],
+            stats=sample_stats,
+            total_count=1,
+            has_more=False,
+            suppression_summary=ss,
+        )
+        fmt = TextFormatter()
+        output = fmt.format_hunt(result)
+        assert "3 suppressed" in output
+        assert "Suppressions:" in output
+        assert "5 rules" in output
+        assert "1 expired" in output
+
+    def test_text_format_hunt_no_suppressions(self, sample_hunt_result):
+        """Text output is unchanged when suppression_summary is None."""
+        fmt = TextFormatter()
+        output = fmt.format_hunt(sample_hunt_result)
+        assert "suppressed" not in output.lower()
+        assert "Suppressions" not in output
+
 
 class TestTextFormatterFullScan:
     def test_format_full_scan_with_verified(self, sample_full_scan_result):
@@ -168,9 +200,7 @@ class TestTextFormatterHuntFuzz:
     def test_format_hunt_fuzz_with_fuzz_result(self, sample_hunt_result, sample_bridge_result):
         from deep_code_security.shared.formatters.protocol import (
             FuzzCrashSummary,
-            FuzzConfigSummary,
             FuzzReportResult,
-            FuzzTargetInfo,
             HuntFuzzResult,
             UniqueCrashSummary,
         )

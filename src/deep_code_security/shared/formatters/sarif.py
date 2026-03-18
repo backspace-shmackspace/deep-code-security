@@ -218,7 +218,24 @@ class SarifFormatter:
     def format_hunt(self, data: HuntResult, target_path: str = "") -> str:
         """Format hunt phase results as SARIF 2.1.0."""
         results = [_build_result(f, target_path) for f in data.findings]
-        rules = _build_rules(data.findings)
+
+        # Emit suppressed findings as SARIF results with suppressions[] array
+        # per the SARIF 2.1.0 spec (section 3.27.23).
+        if data.suppressed_findings and data.suppression_summary is not None:
+            reasons = data.suppression_summary.suppression_reasons
+            for f in data.suppressed_findings:
+                sarif_result = _build_result(f, target_path)
+                justification = reasons.get(f.id, "Suppressed via .dcs-suppress.yaml")
+                sarif_result["suppressions"] = [
+                    {
+                        "kind": "inSource",
+                        "justification": justification,
+                    }
+                ]
+                results.append(sarif_result)
+
+        all_findings = list(data.findings) + list(data.suppressed_findings)
+        rules = _build_rules(all_findings)
         sarif = self._build_sarif_envelope(results, rules, target_path)
         return json.dumps(sarif, indent=2, ensure_ascii=False)
 
@@ -238,7 +255,22 @@ class SarifFormatter:
             guidance_item = guidance_by_id.get(f.id)
             results.append(_build_result(f, target_path, verified, guidance_item))
 
-        rules = _build_rules(data.findings)
+        # Emit suppressed findings with SARIF suppressions[] array
+        if data.suppressed_findings and data.suppression_summary is not None:
+            reasons = data.suppression_summary.suppression_reasons
+            for f in data.suppressed_findings:
+                sarif_result = _build_result(f, target_path)
+                justification = reasons.get(f.id, "Suppressed via .dcs-suppress.yaml")
+                sarif_result["suppressions"] = [
+                    {
+                        "kind": "inSource",
+                        "justification": justification,
+                    }
+                ]
+                results.append(sarif_result)
+
+        all_findings = list(data.findings) + list(data.suppressed_findings)
+        rules = _build_rules(all_findings)
         sarif = self._build_sarif_envelope(results, rules, target_path)
         return json.dumps(sarif, indent=2, ensure_ascii=False)
 

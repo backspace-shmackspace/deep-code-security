@@ -124,3 +124,16 @@ class ScanStats(BaseModel):
     registry_version_hash: str = Field(
         default="", description="Hash of registry files used for reproducibility"
     )
+    findings_suppressed: int = Field(
+        default=0, ge=0, description="Number of findings suppressed by .dcs-suppress.yaml"
+    )
+    suppression_rules_loaded: int = Field(
+        default=0, ge=0, description="Number of suppression rules loaded from .dcs-suppress.yaml"
+    )
+    suppression_rules_expired: int = Field(
+        default=0, ge=0, description="Number of expired suppression rules (skipped)"
+    )
+    suppressed_finding_ids: list[str] = Field(
+        default_factory=list,
+        description="IDs of findings suppressed by .dcs-suppress.yaml",
+    )

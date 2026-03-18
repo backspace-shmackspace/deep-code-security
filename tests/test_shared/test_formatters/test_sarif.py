@@ -250,7 +250,7 @@ class TestSarifHuntFuzz:
 
     def test_format_hunt_fuzz_with_crashes(self, sample_hunt_result):
         """When fuzz_result contains unique crashes, they appear in the fuzz run."""
-        from deep_code_security.bridge.models import BridgeResult, FuzzTarget, SASTContext
+        from deep_code_security.bridge.models import BridgeResult
         from deep_code_security.shared.formatters.protocol import (
             FuzzCrashSummary,
             FuzzReportResult,
@@ -291,6 +291,88 @@ class TestSarifHuntFuzz:
         fuzz_run = parsed["runs"][1]
         assert len(fuzz_run["results"]) == 1
         assert "ZeroDivisionError" in fuzz_run["results"][0]["ruleId"]
+
+
+class TestSarifSuppressions:
+    """Tests for SARIF suppression output per SARIF 2.1.0 spec."""
+
+    def test_sarif_format_hunt_with_suppressions(
+        self, sample_finding, sample_stats, sarif_schema
+    ) -> None:
+        """Suppressed findings are emitted with suppressions[] array."""
+        import jsonschema
+
+        from deep_code_security.hunter.models import RawFinding, Sink, Source, TaintPath
+        from deep_code_security.shared.formatters.protocol import HuntResult, SuppressionSummary
+
+        suppressed_finding = RawFinding(
+            id="suppressed-001",
+            source=Source(
+                file="/tmp/project/app.py",
+                line=5,
+                column=0,
+                function="request.form",
+                category="web_input",
+                language="python",
+            ),
+            sink=Sink(
+                file="/tmp/project/app.py",
+                line=20,
+                column=0,
+                function="os.system",
+                category="command_injection",
+                cwe="CWE-78",
+                language="python",
+            ),
+            taint_path=TaintPath(steps=[], sanitized=False),
+            vulnerability_class="CWE-78: OS Command Injection",
+            severity="high",
+            language="python",
+            raw_confidence=0.6,
+        )
+        ss = SuppressionSummary(
+            suppressed_count=1,
+            total_rules=2,
+            expired_rules=0,
+            suppression_reasons={"suppressed-001": "Admin controlled path"},
+            suppression_file="/tmp/project/.dcs-suppress.yaml",
+        )
+        result = HuntResult(
+            findings=[sample_finding],
+            stats=sample_stats,
+            total_count=1,
+            has_more=False,
+            suppression_summary=ss,
+            suppressed_findings=[suppressed_finding],
+        )
+        fmt = SarifFormatter()
+        output = fmt.format_hunt(result, target_path="/tmp/project")
+        parsed = json.loads(output)
+
+        # Should have 2 results: 1 active + 1 suppressed
+        results = parsed["runs"][0]["results"]
+        assert len(results) == 2
+
+        # Find the suppressed result
+        suppressed_results = [r for r in results if "suppressions" in r]
+        assert len(suppressed_results) == 1
+        sup_result = suppressed_results[0]
+        assert sup_result["suppressions"][0]["kind"] == "inSource"
+        assert "Admin controlled path" in sup_result["suppressions"][0]["justification"]
+
+        # Validate against SARIF schema
+        jsonschema.validate(parsed, sarif_schema)
+
+    def test_sarif_format_hunt_no_suppressions_no_array(
+        self, sample_hunt_result
+    ) -> None:
+        """Active findings do not have a suppressions[] key."""
+        fmt = SarifFormatter()
+        output = fmt.format_hunt(sample_hunt_result, target_path="/tmp/project")
+        parsed = json.loads(output)
+        results = parsed["runs"][0]["results"]
+        for r in results:
+            assert "suppressions" not in r
 
     def test_format_hunt_fuzz_sast_run_has_uri_base(self, sample_hunt_fuzz_result):
         """When target_path is given, SAST run has originalUriBaseIds."""

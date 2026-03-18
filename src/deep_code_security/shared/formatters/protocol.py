@@ -24,9 +24,20 @@ __all__ = [
     "HybridFormatter",
     "ReplayResultDTO",
     "ReplayResultEntry",
+    "SuppressionSummary",
     "UniqueCrashSummary",
     "supports_hybrid",
 ]
+
+
+class SuppressionSummary(BaseModel):
+    """Summary of applied suppressions for formatter output."""
+
+    suppressed_count: int = 0
+    total_rules: int = 0
+    expired_rules: int = 0
+    suppression_reasons: dict[str, str] = Field(default_factory=dict)
+    suppression_file: str = ""
 
 
 class HuntResult(BaseModel):
@@ -36,6 +47,12 @@ class HuntResult(BaseModel):
     stats: ScanStats
     total_count: int = 0
     has_more: bool = False
+    suppression_summary: SuppressionSummary | None = None
+    suppressed_finding_ids: list[str] = Field(default_factory=list)
+    # Full suppressed finding objects — populated by CLI/MCP for SARIF output.
+    # Defaults to empty; formatters that do not need them (text, json, html)
+    # simply ignore this field.
+    suppressed_findings: list[RawFinding] = Field(default_factory=list)
 
 
 class FullScanResult(BaseModel):
@@ -49,6 +66,10 @@ class FullScanResult(BaseModel):
     remediate_stats: RemediateStats | None = None
     total_count: int = 0
     has_more: bool = False
+    suppression_summary: SuppressionSummary | None = None
+    suppressed_finding_ids: list[str] = Field(default_factory=list)
+    # Full suppressed finding objects — populated by CLI/MCP for SARIF output.
+    suppressed_findings: list[RawFinding] = Field(default_factory=list)
 
 
 # ---------- Fuzz-related DTOs ----------
@@ -145,9 +166,9 @@ class HuntFuzzResult(BaseModel):
     """Results from the hunt-fuzz combined pipeline."""
 
     hunt_result: HuntResult
-    bridge_result: "BridgeResult"
+    bridge_result: BridgeResult
     fuzz_result: FuzzReportResult | None = None
-    correlation: "CorrelationReport | None" = None
+    correlation: CorrelationReport | None = None
     analysis_mode: str = "hybrid"
 
     model_config = {"arbitrary_types_allowed": True}

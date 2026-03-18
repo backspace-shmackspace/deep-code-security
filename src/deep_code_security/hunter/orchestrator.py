@@ -17,6 +17,11 @@ from deep_code_security.hunter.taint_tracker import TaintEngine
 from deep_code_security.shared.config import Config, get_config
 from deep_code_security.shared.file_discovery import FileDiscovery
 from deep_code_security.shared.language import Language
+from deep_code_security.shared.suppressions import (
+    SuppressionResult,
+    apply_suppressions,
+    load_suppressions,
+)
 
 __all__ = ["HunterOrchestrator"]
 
@@ -44,6 +49,18 @@ class HunterOrchestrator:
         self._registries: dict[Language, Registry] = {}
         # Session store for findings (keyed by scan_id, used by Auditor)
         self._session_findings: dict[str, list[RawFinding]] = {}
+        # Most recent suppression result (populated by scan() when a suppression file exists)
+        self._last_suppression_result: SuppressionResult | None = None
+
+    @property
+    def last_suppression_result(self) -> SuppressionResult | None:
+        """Return the SuppressionResult from the most recent scan, or None.
+
+        Populated when a `.dcs-suppress.yaml` file is found and suppressions
+        are applied. Callers (e.g., SARIF formatter, CLI) can use this to
+        access suppressed finding objects and per-finding reasons.
+        """
+        return self._last_suppression_result
 
     def scan(
         self,
@@ -52,6 +69,7 @@ class HunterOrchestrator:
         severity_threshold: str = "medium",
         max_results: int = 100,
         offset: int = 0,
+        ignore_suppressions: bool = False,
     ) -> tuple[list[RawFinding], ScanStats, int, bool]:
         """Run a full Hunter scan.
 
@@ -61,6 +79,9 @@ class HunterOrchestrator:
             severity_threshold: Minimum severity to include ('critical', 'high', 'medium', 'low').
             max_results: Maximum findings to return per page.
             offset: Pagination offset.
+            ignore_suppressions: When True, skip loading .dcs-suppress.yaml and
+                return all findings. Useful for periodic full-pipeline verification
+                of suppressed findings.
 
         Returns:
             Tuple of (findings_page, stats, total_count, has_more).
@@ -159,6 +180,45 @@ class HunterOrchestrator:
         # Deduplicate: multiple sources flowing to the same sink are one vulnerability.
         # Key on (file, sink_line, cwe) and keep the highest-confidence finding.
         all_findings = _deduplicate_findings(all_findings)
+
+        # Apply suppressions (after deduplication, before sorting and pagination)
+        suppression_result: SuppressionResult | None = None
+        self._last_suppression_result = None
+        if not ignore_suppressions:
+            try:
+                suppress_config = load_suppressions(target_path)
+                if suppress_config is not None:
+                    suppression_result = apply_suppressions(
+                        all_findings, suppress_config, target_path
+                    )
+                    all_findings = suppression_result.active_findings
+                    self._last_suppression_result = suppression_result
+                    logger.info(
+                        "Suppressions applied: %d suppressed, %d active (%d rules, %d expired)",
+                        len(suppression_result.suppressed_findings),
+                        len(suppression_result.active_findings),
+                        suppression_result.total_rules,
+                        suppression_result.expired_rules,
+                    )
+            except (ValueError, OSError) as e:
+                # Re-raise so CLI/MCP can report a clear error to the user
+                logger.error("Failed to load suppressions file: %s", e)
+                raise
+
+        # Populate ScanStats suppression fields
+        stats.findings_suppressed = (
+            len(suppression_result.suppressed_findings) if suppression_result else 0
+        )
+        stats.suppression_rules_loaded = (
+            suppression_result.total_rules if suppression_result else 0
+        )
+        stats.suppression_rules_expired = (
+            suppression_result.expired_rules if suppression_result else 0
+        )
+        stats.suppressed_finding_ids = (
+            list(suppression_result.suppression_reasons.keys())
+            if suppression_result else []
+        )
 
         # Sort by severity (critical first) and confidence
         all_findings.sort(

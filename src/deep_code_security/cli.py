@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,8 +21,12 @@ from deep_code_security.hunter.orchestrator import HunterOrchestrator
 from deep_code_security.mcp.path_validator import PathValidationError, validate_path
 from deep_code_security.shared.config import get_config
 from deep_code_security.shared.formatters import get_formatter, supports_fuzz, supports_hybrid
-from deep_code_security.shared.formatters.protocol import FullScanResult, HuntResult
-
+from deep_code_security.shared.formatters.protocol import (
+    FullScanResult,
+    HuntResult,
+    SuppressionSummary,
+)
+from deep_code_security.shared.suppressions import SuppressionResult
 
 # Protected write paths (rejected for --output-dir)
 _PROTECTED_WRITE_DIRS = {"src", "registries", ".git"}
@@ -126,6 +129,10 @@ def cli() -> None:
     "--force", is_flag=True, default=False,
     help="Overwrite existing output file.",
 )
+@click.option(
+    "--ignore-suppressions", "ignore_suppressions", is_flag=True, default=False,
+    help="Ignore .dcs-suppress.yaml and report all findings.",
+)
 def hunt(
     path: str,
     language: tuple[str, ...],
@@ -136,6 +143,7 @@ def hunt(
     json_output: bool,
     output_file: str | None,
     force: bool,
+    ignore_suppressions: bool,
 ) -> None:
     """Run the Hunter phase: discover vulnerabilities via AST analysis."""
     config = get_config()
@@ -152,19 +160,57 @@ def hunt(
 
     click.echo(f"Scanning {validated_path}...", err=True)
 
-    findings, stats, total_count, has_more = hunter.scan(
-        target_path=validated_path,
-        languages=list(language) if language else None,
-        severity_threshold=severity,
-        max_results=max_results,
-        offset=offset,
-    )
+    try:
+        findings, stats, total_count, has_more = hunter.scan(
+            target_path=validated_path,
+            languages=list(language) if language else None,
+            severity_threshold=severity,
+            max_results=max_results,
+            offset=offset,
+            ignore_suppressions=ignore_suppressions,
+        )
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
+    # Build suppression summary from orchestrator result
+    suppression_result = hunter.last_suppression_result
+    suppression_summary: SuppressionSummary | None = None
+    suppressed_findings = []
+    if isinstance(suppression_result, SuppressionResult):
+        suppression_summary = SuppressionSummary(
+            suppressed_count=len(suppression_result.suppressed_findings),
+            total_rules=suppression_result.total_rules,
+            expired_rules=suppression_result.expired_rules,
+            suppression_reasons=suppression_result.suppression_reasons,
+            suppression_file=suppression_result.suppression_file_path,
+        )
+        suppressed_findings = suppression_result.suppressed_findings
+        if suppression_summary.suppressed_count > 0:
+            _expired_note = (
+                f", {suppression_summary.expired_rules} expired"
+                if suppression_summary.expired_rules
+                else ""
+            )
+            click.echo(
+                f"Suppressions: {suppression_summary.suppressed_count} finding(s) suppressed "
+                f"({suppression_summary.total_rules} rule(s){_expired_note})",
+                err=True,
+            )
+
+    _suppressed_ids = (
+        list(suppression_result.suppression_reasons.keys())
+        if isinstance(suppression_result, SuppressionResult)
+        else []
+    )
     hunt_result = HuntResult(
         findings=findings,
         stats=stats,
         total_count=total_count,
         has_more=has_more,
+        suppression_summary=suppression_summary,
+        suppressed_finding_ids=_suppressed_ids,
+        suppressed_findings=suppressed_findings,
     )
 
     formatter = get_formatter(fmt_name)
@@ -230,6 +276,10 @@ def verify(
     "--force", is_flag=True, default=False,
     help="Overwrite existing output file.",
 )
+@click.option(
+    "--ignore-suppressions", "ignore_suppressions", is_flag=True, default=False,
+    help="Ignore .dcs-suppress.yaml and report all findings.",
+)
 def full_scan(
     path: str,
     language: tuple[str, ...],
@@ -242,6 +292,7 @@ def full_scan(
     json_output: bool,
     output_file: str | None,
     force: bool,
+    ignore_suppressions: bool,
 ) -> None:
     """Run all three phases: Hunt -> Verify -> Remediate."""
     config = get_config()
@@ -260,13 +311,18 @@ def full_scan(
 
     click.echo(f"[1/3] Scanning {validated_path}...", err=True)
 
-    findings, hunt_stats, total_count, has_more = hunter.scan(
-        target_path=validated_path,
-        languages=list(language) if language else None,
-        severity_threshold=severity,
-        max_results=max_results,
-        offset=0,
-    )
+    try:
+        findings, hunt_stats, total_count, has_more = hunter.scan(
+            target_path=validated_path,
+            languages=list(language) if language else None,
+            severity_threshold=severity,
+            max_results=max_results,
+            offset=0,
+            ignore_suppressions=ignore_suppressions,
+        )
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
     click.echo(
         f"  Found {total_count} findings in {hunt_stats.files_scanned} files",
@@ -316,6 +372,37 @@ def full_scan(
             target_path=validated_path,
         )
 
+    # Build suppression summary from orchestrator result
+    suppression_result = hunter.last_suppression_result
+    suppression_summary_fs: SuppressionSummary | None = None
+    suppressed_findings_fs = []
+    if isinstance(suppression_result, SuppressionResult):
+        suppression_summary_fs = SuppressionSummary(
+            suppressed_count=len(suppression_result.suppressed_findings),
+            total_rules=suppression_result.total_rules,
+            expired_rules=suppression_result.expired_rules,
+            suppression_reasons=suppression_result.suppression_reasons,
+            suppression_file=suppression_result.suppression_file_path,
+        )
+        suppressed_findings_fs = suppression_result.suppressed_findings
+        if suppression_summary_fs.suppressed_count > 0:
+            _expired_note_fs = (
+                f", {suppression_summary_fs.expired_rules} expired"
+                if suppression_summary_fs.expired_rules
+                else ""
+            )
+            click.echo(
+                f"Suppressions: {suppression_summary_fs.suppressed_count} "
+                f"finding(s) suppressed "
+                f"({suppression_summary_fs.total_rules} rule(s){_expired_note_fs})",
+                err=True,
+            )
+
+    _suppressed_ids_fs = (
+        list(suppression_result.suppression_reasons.keys())
+        if isinstance(suppression_result, SuppressionResult)
+        else []
+    )
     full_scan_result = FullScanResult(
         findings=findings,
         verified=verified,
@@ -325,6 +412,9 @@ def full_scan(
         remediate_stats=remediate_stats,
         total_count=total_count,
         has_more=has_more,
+        suppression_summary=suppression_summary_fs,
+        suppressed_finding_ids=_suppressed_ids_fs,
+        suppressed_findings=suppressed_findings_fs,
     )
 
     formatter = get_formatter(fmt_name)
@@ -707,6 +797,10 @@ def report(output_dir: str, output_format: str | None) -> None:
 @click.option("--consent", "consent_flag", is_flag=True, help="Consent to API transmission.")
 @click.option("--dry-run", is_flag=True, help="Preview what would be sent.")
 @click.option("--verbose", is_flag=True, help="Verbose output.")
+@click.option(
+    "--ignore-suppressions", "ignore_suppressions", is_flag=True, default=False,
+    help="Ignore .dcs-suppress.yaml and report all findings.",
+)
 def hunt_fuzz(
     path: str,
     language: tuple[str, ...],
@@ -725,6 +819,7 @@ def hunt_fuzz(
     consent_flag: bool,
     dry_run: bool,
     verbose: bool,
+    ignore_suppressions: bool,
 ) -> None:
     """Run SAST analysis then fuzz the identified vulnerable functions."""
     config = get_config()
@@ -755,13 +850,18 @@ def hunt_fuzz(
     hunter = HunterOrchestrator(config=config)
     click.echo(f"[1/3] Scanning {validated_path}...", err=True)
 
-    findings, hunt_stats, total_count, has_more = hunter.scan(
-        target_path=validated_path,
-        languages=list(language) if language else None,
-        severity_threshold=severity,
-        max_results=max_findings,
-        offset=0,
-    )
+    try:
+        findings, hunt_stats, total_count, has_more = hunter.scan(
+            target_path=validated_path,
+            languages=list(language) if language else None,
+            severity_threshold=severity,
+            max_results=max_findings,
+            offset=0,
+            ignore_suppressions=ignore_suppressions,
+        )
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
     click.echo(
         f"  Found {total_count} findings in {hunt_stats.files_scanned} files",
         err=True,
@@ -769,11 +869,45 @@ def hunt_fuzz(
 
     from deep_code_security.shared.formatters.protocol import HuntResult
 
+    # Build suppression summary from orchestrator result
+    hf_suppression_result = hunter.last_suppression_result
+    hf_suppression_summary: SuppressionSummary | None = None
+    hf_suppressed_findings = []
+    if isinstance(hf_suppression_result, SuppressionResult):
+        hf_suppression_summary = SuppressionSummary(
+            suppressed_count=len(hf_suppression_result.suppressed_findings),
+            total_rules=hf_suppression_result.total_rules,
+            expired_rules=hf_suppression_result.expired_rules,
+            suppression_reasons=hf_suppression_result.suppression_reasons,
+            suppression_file=hf_suppression_result.suppression_file_path,
+        )
+        hf_suppressed_findings = hf_suppression_result.suppressed_findings
+        if hf_suppression_summary.suppressed_count > 0:
+            _expired_note_hf = (
+                f", {hf_suppression_summary.expired_rules} expired"
+                if hf_suppression_summary.expired_rules
+                else ""
+            )
+            click.echo(
+                f"Suppressions: {hf_suppression_summary.suppressed_count} "
+                f"finding(s) suppressed "
+                f"({hf_suppression_summary.total_rules} rule(s){_expired_note_hf})",
+                err=True,
+            )
+
+    _suppressed_ids_hf = (
+        list(hf_suppression_result.suppression_reasons.keys())
+        if isinstance(hf_suppression_result, SuppressionResult)
+        else []
+    )
     hunt_result = HuntResult(
         findings=findings,
         stats=hunt_stats,
         total_count=total_count,
         has_more=has_more,
+        suppression_summary=hf_suppression_summary,
+        suppressed_finding_ids=_suppressed_ids_hf,
+        suppressed_findings=hf_suppressed_findings,
     )
 
     # Phase 2: Bridge

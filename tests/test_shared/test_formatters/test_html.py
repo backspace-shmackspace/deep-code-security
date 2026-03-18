@@ -192,3 +192,114 @@ class TestHtmlFullScan:
         output = fmt.format_hunt(result)
         assert "No findings detected" in output
         assert "<html" in output
+
+
+class TestHtmlSuppressions:
+    """Tests for HTML suppression section in hunt output."""
+
+    def test_html_format_hunt_with_suppressions(self, sample_finding, sample_stats):
+        """HTML output includes a suppression section when suppressions active."""
+        from deep_code_security.shared.formatters.protocol import HuntResult, SuppressionSummary
+
+        ss = SuppressionSummary(
+            suppressed_count=2,
+            total_rules=3,
+            expired_rules=0,
+            suppression_reasons={
+                "f1": "Admin controlled path",
+                "f2": "Auto-generated code",
+            },
+            suppression_file="/project/.dcs-suppress.yaml",
+        )
+        result = HuntResult(
+            findings=[sample_finding],
+            stats=sample_stats,
+            total_count=1,
+            has_more=False,
+            suppression_summary=ss,
+        )
+        fmt = HtmlFormatter()
+        output = fmt.format_hunt(result)
+        assert "Suppressions" in output
+        assert "2 finding(s) suppressed" in output
+        assert "Admin controlled path" in output
+        assert "Auto-generated code" in output
+
+    def test_html_format_hunt_with_suppressions_and_expired(
+        self, sample_finding, sample_stats
+    ):
+        """Expired count appears in suppression section."""
+        from deep_code_security.shared.formatters.protocol import HuntResult, SuppressionSummary
+
+        ss = SuppressionSummary(
+            suppressed_count=1,
+            total_rules=4,
+            expired_rules=2,
+            suppression_reasons={"f1": "Known FP"},
+            suppression_file="/project/.dcs-suppress.yaml",
+        )
+        result = HuntResult(
+            findings=[sample_finding],
+            stats=sample_stats,
+            total_count=1,
+            has_more=False,
+            suppression_summary=ss,
+        )
+        fmt = HtmlFormatter()
+        output = fmt.format_hunt(result)
+        assert "2 expired" in output
+
+    def test_html_format_hunt_no_suppressions(self, sample_hunt_result):
+        """No suppression section when suppression_summary is None."""
+        fmt = HtmlFormatter()
+        output = fmt.format_hunt(sample_hunt_result)
+        assert "Suppressions" not in output
+
+    def test_html_format_hunt_zero_suppressed_no_section(
+        self, sample_finding, sample_stats
+    ):
+        """No suppression section when suppressed_count is 0."""
+        from deep_code_security.shared.formatters.protocol import HuntResult, SuppressionSummary
+
+        ss = SuppressionSummary(
+            suppressed_count=0,
+            total_rules=2,
+            expired_rules=0,
+            suppression_reasons={},
+            suppression_file="/project/.dcs-suppress.yaml",
+        )
+        result = HuntResult(
+            findings=[sample_finding],
+            stats=sample_stats,
+            total_count=1,
+            has_more=False,
+            suppression_summary=ss,
+        )
+        fmt = HtmlFormatter()
+        output = fmt.format_hunt(result)
+        assert "Suppressions" not in output
+
+    def test_html_suppression_section_escapes_reasons(
+        self, sample_finding, sample_stats
+    ):
+        """Suppression reasons are HTML-escaped."""
+        from deep_code_security.shared.formatters.protocol import HuntResult, SuppressionSummary
+
+        ss = SuppressionSummary(
+            suppressed_count=1,
+            total_rules=1,
+            expired_rules=0,
+            suppression_reasons={"f1": "<script>alert(1)</script>"},
+            suppression_file="/project/.dcs-suppress.yaml",
+        )
+        result = HuntResult(
+            findings=[sample_finding],
+            stats=sample_stats,
+            total_count=1,
+            has_more=False,
+            suppression_summary=ss,
+        )
+        fmt = HtmlFormatter()
+        output = fmt.format_hunt(result)
+        assert "<script>" not in output
+        assert "&lt;script&gt;" in output

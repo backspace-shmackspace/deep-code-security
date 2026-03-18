@@ -81,6 +81,41 @@ class TestJsonFormatterHunt:
         assert isinstance(parsed["total_count"], int)
         assert isinstance(parsed["has_more"], bool)
 
+    def test_json_format_hunt_with_suppressions(self, sample_finding, sample_stats):
+        """JSON includes suppressions key when suppression_summary is present."""
+        from deep_code_security.shared.formatters.protocol import HuntResult, SuppressionSummary
+
+        ss = SuppressionSummary(
+            suppressed_count=2,
+            total_rules=3,
+            expired_rules=0,
+            suppression_reasons={"f1": "Admin paths", "f2": "Generated code"},
+            suppression_file="/project/.dcs-suppress.yaml",
+        )
+        result = HuntResult(
+            findings=[sample_finding],
+            stats=sample_stats,
+            total_count=1,
+            has_more=False,
+            suppression_summary=ss,
+        )
+        fmt = JsonFormatter()
+        output = fmt.format_hunt(result)
+        parsed = json.loads(output)
+        assert "suppressions" in parsed
+        assert parsed["suppressions"]["suppressed_count"] == 2
+        assert parsed["suppressions"]["total_rules"] == 3
+        assert parsed["suppressions"]["expired_rules"] == 0
+        assert "reasons" in parsed["suppressions"]
+        assert parsed["suppressions"]["reasons"]["f1"] == "Admin paths"
+
+    def test_json_format_hunt_no_suppressions(self, sample_hunt_result):
+        """No suppressions key in JSON when suppression_summary is None."""
+        fmt = JsonFormatter()
+        output = fmt.format_hunt(sample_hunt_result)
+        parsed = json.loads(output)
+        assert "suppressions" not in parsed
+
 
 class TestJsonFormatterFullScan:
     def test_format_full_scan_valid_json(self, sample_full_scan_result):

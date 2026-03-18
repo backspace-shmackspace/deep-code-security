@@ -21,17 +21,25 @@ class JsonFormatter:
 
     def format_hunt(self, data: HuntResult, target_path: str = "") -> str:
         """Format hunt phase results as JSON."""
-        output = {
+        output: dict = {
             "findings": serialize_models(data.findings),
             "stats": serialize_model(data.stats),
             "total_count": data.total_count,
             "has_more": data.has_more,
         }
+        if data.suppression_summary is not None:
+            ss = data.suppression_summary
+            output["suppressions"] = {
+                "suppressed_count": ss.suppressed_count,
+                "total_rules": ss.total_rules,
+                "expired_rules": ss.expired_rules,
+                "reasons": ss.suppression_reasons,
+            }
         return json.dumps(output, indent=2, ensure_ascii=False)
 
     def format_full_scan(self, data: FullScanResult, target_path: str = "") -> str:
         """Format full-scan results as JSON."""
-        output = {
+        output: dict = {
             "findings": serialize_models(data.findings),
             "verified": serialize_models(data.verified),
             "guidance": serialize_models(data.guidance),
@@ -43,6 +51,14 @@ class JsonFormatter:
             "total_count": data.total_count,
             "has_more": data.has_more,
         }
+        if data.suppression_summary is not None:
+            ss = data.suppression_summary
+            output["suppressions"] = {
+                "suppressed_count": ss.suppressed_count,
+                "total_rules": ss.total_rules,
+                "expired_rules": ss.expired_rules,
+                "reasons": ss.suppression_reasons,
+            }
         return json.dumps(output, indent=2, ensure_ascii=False)
 
     def format_fuzz(self, data: FuzzReportResult, target_path: str = "") -> str:

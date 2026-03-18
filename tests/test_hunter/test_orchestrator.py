@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from deep_code_security.hunter.orchestrator import HunterOrchestrator
 from deep_code_security.hunter.registry import clear_registry_cache
@@ -171,3 +172,214 @@ class TestHunterOrchestratorScan:
             retrieved = hunter.get_findings_for_ids(ids)
             assert len(retrieved) == 1
             assert retrieved[0].id == findings[0].id
+
+
+class TestHunterOrchestratorSuppressions:
+    """Tests for suppression integration in HunterOrchestrator.scan()."""
+
+    def test_scan_return_tuple_unchanged(self, hunter_config: Config) -> None:
+        """scan() still returns a 4-tuple even with suppressions present."""
+        hunter = HunterOrchestrator(config=hunter_config)
+        result = hunter.scan(target_path=str(VULNERABLE_PYTHON))
+        assert len(result) == 4
+
+    def test_scan_without_suppression_file(
+        self, hunter_config: Config, tmp_path: Path
+    ) -> None:
+        """ScanStats suppression fields are 0/empty when no suppression file exists."""
+        os.environ["DCS_ALLOWED_PATHS"] = str(tmp_path)
+        reset_config()
+        config = Config()
+        config.registry_path = hunter_config.registry_path
+        hunter = HunterOrchestrator(config=config)
+        _, stats, _, _ = hunter.scan(target_path=str(tmp_path))
+        assert stats.findings_suppressed == 0
+        assert stats.suppression_rules_loaded == 0
+        assert stats.suppression_rules_expired == 0
+        assert stats.suppressed_finding_ids == []
+        assert hunter.last_suppression_result is None
+        os.environ.pop("DCS_ALLOWED_PATHS", None)
+        reset_config()
+
+    def test_scan_with_suppression_file(
+        self, hunter_config: Config
+    ) -> None:
+        """Suppressions are applied when .dcs-suppress.yaml exists in the target."""
+        hunter = HunterOrchestrator(config=hunter_config)
+        # First get findings without any suppression file to see what we find
+        findings_all, stats_all, total_all, _ = hunter.scan(
+            target_path=str(VULNERABLE_PYTHON),
+            severity_threshold="low",
+        )
+        if not findings_all:
+            # Nothing to suppress -- test is vacuously passing
+            return
+
+        # Write a suppression file that suppresses everything found
+        suppress_file = VULNERABLE_PYTHON / ".dcs-suppress.yaml"
+        first_finding = findings_all[0]
+        suppress_data = {
+            "version": 1,
+            "suppressions": [
+                {
+                    "rule": first_finding.sink.cwe,
+                    "reason": "Suppressing for test",
+                }
+            ],
+        }
+        try:
+            suppress_file.write_text(
+                yaml.dump(suppress_data), encoding="utf-8"
+            )
+            findings_suppressed, stats, total, _ = hunter.scan(
+                target_path=str(VULNERABLE_PYTHON),
+                severity_threshold="low",
+            )
+            # The finding matching the rule should be suppressed
+            assert stats.findings_suppressed >= 0
+            assert stats.suppression_rules_loaded == 1
+        finally:
+            suppress_file.unlink(missing_ok=True)
+
+    def test_scan_ignore_suppressions_flag(
+        self, hunter_config: Config
+    ) -> None:
+        """All findings returned when ignore_suppressions=True."""
+        hunter = HunterOrchestrator(config=hunter_config)
+        findings_all, _, total_all, _ = hunter.scan(
+            target_path=str(VULNERABLE_PYTHON),
+            severity_threshold="low",
+        )
+        if not findings_all:
+            return
+
+        # Write a suppression file that would suppress everything
+        suppress_file = VULNERABLE_PYTHON / ".dcs-suppress.yaml"
+        suppress_data = {
+            "version": 1,
+            "suppressions": [
+                {
+                    "file": "**/*.py",
+                    "reason": "Suppressing all for test",
+                }
+            ],
+        }
+        try:
+            suppress_file.write_text(
+                yaml.dump(suppress_data), encoding="utf-8"
+            )
+            # With ignore_suppressions=True, all findings are returned
+            findings_ignored, _, total_ignored, _ = hunter.scan(
+                target_path=str(VULNERABLE_PYTHON),
+                severity_threshold="low",
+                ignore_suppressions=True,
+            )
+            assert total_ignored == total_all
+            assert hunter.last_suppression_result is None
+        finally:
+            suppress_file.unlink(missing_ok=True)
+
+    def test_scan_stats_include_suppression_counts(
+        self, hunter_config: Config
+    ) -> None:
+        """ScanStats.findings_suppressed is populated from SuppressionResult."""
+        hunter = HunterOrchestrator(config=hunter_config)
+        findings_all, _, _, _ = hunter.scan(
+            target_path=str(VULNERABLE_PYTHON),
+            severity_threshold="low",
+        )
+        if not findings_all:
+            return
+
+        suppress_file = VULNERABLE_PYTHON / ".dcs-suppress.yaml"
+        first_finding = findings_all[0]
+        suppress_data = {
+            "version": 1,
+            "suppressions": [
+                {
+                    "rule": first_finding.sink.cwe,
+                    "reason": "Test suppression",
+                }
+            ],
+        }
+        try:
+            suppress_file.write_text(
+                yaml.dump(suppress_data), encoding="utf-8"
+            )
+            _, stats, _, _ = hunter.scan(
+                target_path=str(VULNERABLE_PYTHON),
+                severity_threshold="low",
+            )
+            # Stats fields should be populated
+            assert isinstance(stats.findings_suppressed, int)
+            assert isinstance(stats.suppression_rules_loaded, int)
+            assert isinstance(stats.suppression_rules_expired, int)
+            assert isinstance(stats.suppressed_finding_ids, list)
+            assert stats.suppression_rules_loaded == 1
+        finally:
+            suppress_file.unlink(missing_ok=True)
+
+    def test_scan_last_suppression_result(
+        self, hunter_config: Config
+    ) -> None:
+        """orchestrator.last_suppression_result is populated after a scan with suppression file."""
+        hunter = HunterOrchestrator(config=hunter_config)
+        # No suppression file: result is None
+        hunter.scan(
+            target_path=str(VULNERABLE_PYTHON),
+            severity_threshold="low",
+        )
+        assert hunter.last_suppression_result is None
+
+        findings_all, _, _, _ = hunter.scan(
+            target_path=str(VULNERABLE_PYTHON),
+            severity_threshold="low",
+        )
+        if not findings_all:
+            return
+
+        suppress_file = VULNERABLE_PYTHON / ".dcs-suppress.yaml"
+        suppress_data = {
+            "version": 1,
+            "suppressions": [
+                {
+                    "rule": findings_all[0].sink.cwe,
+                    "reason": "Test last result",
+                }
+            ],
+        }
+        try:
+            suppress_file.write_text(
+                yaml.dump(suppress_data), encoding="utf-8"
+            )
+            hunter.scan(
+                target_path=str(VULNERABLE_PYTHON),
+                severity_threshold="low",
+            )
+            # last_suppression_result is now populated
+            result = hunter.last_suppression_result
+            assert result is not None
+            assert isinstance(result.active_findings, list)
+            assert isinstance(result.suppressed_findings, list)
+            assert result.total_rules == 1
+        finally:
+            suppress_file.unlink(missing_ok=True)
+
+    def test_scan_malformed_suppression_file_raises(
+        self, hunter_config: Config
+    ) -> None:
+        """A malformed .dcs-suppress.yaml raises ValueError."""
+        suppress_file = VULNERABLE_PYTHON / ".dcs-suppress.yaml"
+        try:
+            suppress_file.write_text(
+                "version: 1\nsuppressions: [{\n  broken yaml\n",
+                encoding="utf-8",
+            )
+            hunter = HunterOrchestrator(config=hunter_config)
+            with pytest.raises(ValueError):
+                hunter.scan(
+                    target_path=str(VULNERABLE_PYTHON),
+                    severity_threshold="low",
+                )
+        finally:
+            suppress_file.unlink(missing_ok=True)

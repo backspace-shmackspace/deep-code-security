@@ -85,11 +85,14 @@ tests/               # pytest suite (90%+ coverage required)
 | Command | Description |
 |---------|-------------|
 | `dcs hunt <path>` | Static analysis (Hunter phase) |
+| `dcs hunt <path> --ignore-suppressions` | Static analysis ignoring .dcs-suppress.yaml |
 | `dcs full-scan <path>` | All three SAST phases |
+| `dcs full-scan <path> --ignore-suppressions` | Full scan ignoring .dcs-suppress.yaml |
 | `dcs verify` | Auditor phase (requires prior hunt) |
 | `dcs status` | Server health + fuzzer availability |
 | `dcs fuzz <target>` | Run AI-powered fuzzer |
 | `dcs hunt-fuzz <path>` | Hunt then fuzz: SAST -> bridge -> fuzz -> correlation report |
+| `dcs hunt-fuzz <path> --ignore-suppressions` | Hunt-fuzz ignoring .dcs-suppress.yaml |
 | `dcs replay <corpus_dir>` | Re-execute saved crash inputs |
 | `dcs corpus <corpus_dir>` | Inspect corpus contents |
 | `dcs fuzz-plugins` | List available fuzzer plugins |

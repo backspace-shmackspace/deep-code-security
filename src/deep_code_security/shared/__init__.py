@@ -4,14 +4,28 @@ from deep_code_security.shared.config import Config
 from deep_code_security.shared.file_discovery import FileDiscovery
 from deep_code_security.shared.json_output import serialize_model, serialize_models
 from deep_code_security.shared.language import Language, detect_language
+from deep_code_security.shared.suppressions import (
+    SuppressionConfig,
+    SuppressionLoadError,
+    SuppressionResult,
+    SuppressionRule,
+    apply_suppressions,
+    load_suppressions,
+)
 
 __all__ = [
     "Config",
     "FileDiscovery",
     "Language",
+    "SuppressionConfig",
+    "SuppressionLoadError",
+    "SuppressionResult",
+    "SuppressionRule",
+    "apply_suppressions",
     "detect_language",
     "get_formatter",
     "get_supported_formats",
+    "load_suppressions",
     "serialize_model",
     "serialize_models",
 ]

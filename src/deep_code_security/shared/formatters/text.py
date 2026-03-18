@@ -23,9 +23,16 @@ class TextFormatter:
         """Format hunt phase results as human-readable text."""
         lines: list[str] = []
 
+        suppressed_count = (
+            data.suppression_summary.suppressed_count
+            if data.suppression_summary is not None
+            else 0
+        )
+        suppressed_note = f" ({suppressed_count} suppressed)" if suppressed_count > 0 else ""
+
         lines.append(
             f"Scanned {data.stats.files_scanned} files, "
-            f"found {data.total_count} findings "
+            f"found {data.total_count} findings{suppressed_note} "
             f"({data.stats.scan_duration_ms}ms)"
         )
 
@@ -38,6 +45,14 @@ class TextFormatter:
 
         if data.has_more:
             lines.append("... and more results available (increase --max-results or use --offset)")
+
+        if data.suppression_summary is not None and suppressed_count > 0:
+            ss = data.suppression_summary
+            expired_note = f", {ss.expired_rules} expired" if ss.expired_rules > 0 else ""
+            lines.append(
+                f"Suppressions: {suppressed_count} suppressed "
+                f"({ss.total_rules} rules{expired_note})"
+            )
 
         return "\n".join(lines)
 

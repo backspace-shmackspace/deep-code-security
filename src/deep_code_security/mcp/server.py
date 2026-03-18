@@ -19,7 +19,7 @@ from typing import Any
 from deep_code_security.architect.orchestrator import ArchitectOrchestrator
 from deep_code_security.auditor.orchestrator import AuditorOrchestrator
 from deep_code_security.fuzzer.execution.sandbox import ContainerBackend, select_backend
-from deep_code_security.hunter.models import RawFinding
+from deep_code_security.hunter.models import RawFinding, ScanStats
 from deep_code_security.hunter.orchestrator import HunterOrchestrator
 from deep_code_security.mcp.input_validator import (
     InputValidationError,
@@ -176,6 +176,11 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                         "default": 0,
                         "description": "Pagination offset",
                     },
+                    "ignore_suppressions": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Ignore .dcs-suppress.yaml suppression rules",
+                    },
                 },
                 "required": ["path"],
             },
@@ -279,6 +284,11 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                     "max_verifications": {
                         "type": "integer",
                         "default": 50,
+                    },
+                    "ignore_suppressions": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Ignore .dcs-suppress.yaml suppression rules",
                     },
                 },
                 "required": ["path"],
@@ -420,6 +430,11 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                                 "default": 10,
                                 "description": "Maximum fuzz targets from bridge (default: 10)",
                             },
+                            "ignore_suppressions": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "Ignore .dcs-suppress.yaml suppression rules",
+                            },
                         },
                         "required": ["path", "consent"],
                     },
@@ -446,6 +461,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         severity_threshold = params.get("severity_threshold", "medium")
         max_results = min(int(params.get("max_results", 100)), 1000)
         offset = max(0, int(params.get("offset", 0)))
+        ignore_suppressions = bool(params.get("ignore_suppressions", False))
 
         try:
             findings, stats, total_count, has_more = self.hunter.scan(
@@ -454,6 +470,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 severity_threshold=severity_threshold,
                 max_results=max_results,
                 offset=offset,
+                ignore_suppressions=ignore_suppressions,
             )
         except Exception as e:
             logger.error("Hunt failed: %s", e)
@@ -478,17 +495,31 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             duration_ms,
         )
 
+        response: dict[str, Any] = {
+            "findings": serialize_models(findings),
+            "stats": serialize_model(stats),
+            "total_count": total_count,
+            "has_more": has_more,
+            "scan_id": scan_id,
+        }
+
+        # Include suppression summary from ScanStats fields
+        if (
+            isinstance(stats, ScanStats)
+            and (stats.suppression_rules_loaded > 0 or stats.findings_suppressed > 0)
+        ):
+            response["suppressions"] = {
+                "suppressed_count": stats.findings_suppressed,
+                "total_rules": stats.suppression_rules_loaded,
+                "expired_rules": stats.suppression_rules_expired,
+                "suppressed_finding_ids": stats.suppressed_finding_ids,
+            }
+
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps({
-                        "findings": serialize_models(findings),
-                        "stats": serialize_model(stats),
-                        "total_count": total_count,
-                        "has_more": has_more,
-                        "scan_id": scan_id,
-                    }, ensure_ascii=False),
+                    "text": json.dumps(response, ensure_ascii=False),
                 }
             ]
         }
@@ -635,6 +666,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         skip_verification = bool(params.get("skip_verification", False))
         max_results = min(int(params.get("max_results", 100)), 1000)
         max_verifications = int(params.get("max_verifications", 50))
+        ignore_suppressions = bool(params.get("ignore_suppressions", False))
 
         # Phase 1: Hunt
         try:
@@ -644,6 +676,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 severity_threshold=severity_threshold,
                 max_results=max_results,
                 offset=0,
+                ignore_suppressions=ignore_suppressions,
             )
         except Exception as e:
             raise ToolError(f"Hunt phase failed: {e}", retryable=True) from e
@@ -716,20 +749,34 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             duration_ms,
         )
 
+        full_response: dict[str, Any] = {
+            "findings": serialize_models(findings),
+            "verified": serialize_models(verified),
+            "guidance": serialize_models(guidance),
+            "hunt_stats": serialize_model(hunt_stats),
+            "verify_stats": serialize_model(verify_stats) if verify_stats else None,
+            "remediate_stats": serialize_model(remediate_stats) if remediate_stats else None,
+            "total_count": total_count,
+            "has_more": has_more,
+        }
+
+        # Include suppression summary from ScanStats fields
+        if (
+            isinstance(hunt_stats, ScanStats)
+            and (hunt_stats.suppression_rules_loaded > 0 or hunt_stats.findings_suppressed > 0)
+        ):
+            full_response["suppressions"] = {
+                "suppressed_count": hunt_stats.findings_suppressed,
+                "total_rules": hunt_stats.suppression_rules_loaded,
+                "expired_rules": hunt_stats.suppression_rules_expired,
+                "suppressed_finding_ids": hunt_stats.suppressed_finding_ids,
+            }
+
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps({
-                        "findings": serialize_models(findings),
-                        "verified": serialize_models(verified),
-                        "guidance": serialize_models(guidance),
-                        "hunt_stats": serialize_model(hunt_stats),
-                        "verify_stats": serialize_model(verify_stats) if verify_stats else None,
-                        "remediate_stats": serialize_model(remediate_stats) if remediate_stats else None,
-                        "total_count": total_count,
-                        "has_more": has_more,
-                    }, ensure_ascii=False),
+                    "text": json.dumps(full_response, ensure_ascii=False),
                 }
             ]
         }
@@ -851,7 +898,6 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         thread that runs FuzzOrchestrator with ContainerBackend. Returns immediately
         with a fuzz_run_id that can be polled via deep_scan_fuzz_status.
         """
-        import os
 
         # Consent check — must be explicitly True
         consent = params.get("consent", False)
@@ -1032,7 +1078,6 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         synchronously, then launches fuzzing in a background thread (same pattern as
         _handle_fuzz). Returns immediately with a fuzz_run_id for polling.
         """
-        import os
 
         # Consent check -- must be explicitly True
         consent = params.get("consent", False)
@@ -1056,6 +1101,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         max_findings = min(int(params.get("max_findings", 100)), 1000)
         max_fuzz_targets = min(max(1, int(params.get("max_fuzz_targets", 10))), 100)
         max_iterations = int(params.get("max_iterations", 5))
+        ignore_suppressions = bool(params.get("ignore_suppressions", False))
 
         # Enforce concurrent run limit
         active_count = sum(
@@ -1076,6 +1122,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 severity_threshold=severity_threshold,
                 max_results=max_findings,
                 offset=0,
+                ignore_suppressions=ignore_suppressions,
             )
         except Exception as e:
             logger.error("Hunt phase failed in hunt_fuzz: %s", e)
@@ -1118,26 +1165,34 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
 
         if not fuzz_targets:
             # No fuzz targets -- return immediately with diagnostics
+            no_target_response: dict[str, Any] = {
+                "status": "no_fuzz_targets",
+                "message": (
+                    "No fuzz targets found. Findings may be in route handlers "
+                    "that require framework harnesses. "
+                    f"not_directly_fuzzable={bridge_result.not_directly_fuzzable}"
+                ),
+                "hunt_summary": {
+                    "total_findings": total_count,
+                    "scan_id": scan_id,
+                },
+                "bridge_summary": bridge_summary,
+            }
+            if (
+                isinstance(hunt_stats, ScanStats)
+                and (hunt_stats.suppression_rules_loaded > 0 or hunt_stats.findings_suppressed > 0)
+            ):
+                no_target_response["suppressions"] = {
+                    "suppressed_count": hunt_stats.findings_suppressed,
+                    "total_rules": hunt_stats.suppression_rules_loaded,
+                    "expired_rules": hunt_stats.suppression_rules_expired,
+                    "suppressed_finding_ids": hunt_stats.suppressed_finding_ids,
+                }
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": json.dumps(
-                            {
-                                "status": "no_fuzz_targets",
-                                "message": (
-                                    "No fuzz targets found. Findings may be in route handlers "
-                                    "that require framework harnesses. "
-                                    f"not_directly_fuzzable={bridge_result.not_directly_fuzzable}"
-                                ),
-                                "hunt_summary": {
-                                    "total_findings": total_count,
-                                    "scan_id": scan_id,
-                                },
-                                "bridge_summary": bridge_summary,
-                            },
-                            ensure_ascii=False,
-                        ),
+                        "text": json.dumps(no_target_response, ensure_ascii=False),
                     }
                 ]
             }
@@ -1182,8 +1237,8 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
 
         def _run_hunt_fuzz() -> None:
             from deep_code_security.fuzzer.config import FuzzerConfig
-            from deep_code_security.fuzzer.orchestrator import FuzzOrchestrator
             from deep_code_security.fuzzer.execution.sandbox import select_backend
+            from deep_code_security.fuzzer.orchestrator import FuzzOrchestrator
 
             timer: threading.Timer | None = None
             try:
@@ -1297,26 +1352,35 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             0,
         )
 
+        hf_started_response: dict[str, Any] = {
+            "fuzz_run_id": run_id,
+            "status": "running",
+            "hunt_summary": {
+                "total_findings": total_count,
+                "scan_id": scan_id,
+            },
+            "bridge_summary": bridge_summary,
+            "message": (
+                "Hunt-fuzz run started. Poll with deep_scan_fuzz_status "
+                f"using fuzz_run_id={run_id!r}."
+            ),
+        }
+        if (
+            isinstance(hunt_stats, ScanStats)
+            and (hunt_stats.suppression_rules_loaded > 0 or hunt_stats.findings_suppressed > 0)
+        ):
+            hf_started_response["suppressions"] = {
+                "suppressed_count": hunt_stats.findings_suppressed,
+                "total_rules": hunt_stats.suppression_rules_loaded,
+                "expired_rules": hunt_stats.suppression_rules_expired,
+                "suppressed_finding_ids": hunt_stats.suppressed_finding_ids,
+            }
+
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps(
-                        {
-                            "fuzz_run_id": run_id,
-                            "status": "running",
-                            "hunt_summary": {
-                                "total_findings": total_count,
-                                "scan_id": scan_id,
-                            },
-                            "bridge_summary": bridge_summary,
-                            "message": (
-                                "Hunt-fuzz run started. Poll with deep_scan_fuzz_status "
-                                f"using fuzz_run_id={run_id!r}."
-                            ),
-                        },
-                        ensure_ascii=False,
-                    ),
+                    "text": json.dumps(hf_started_response, ensure_ascii=False),
                 }
             ]
         }

@@ -12,6 +12,7 @@ from deep_code_security.shared.formatters.protocol import (
     FuzzReportResult,
     HuntResult,
     ReplayResultDTO,
+    SuppressionSummary,
 )
 
 __all__ = ["HtmlFormatter"]
@@ -87,12 +88,13 @@ class HtmlFormatter:
         title = "Deep Code Security — Hunt Report"
         summary_html = self._build_hunt_summary(data, target_path)
         findings_html = self._build_hunt_findings(data)
+        suppression_html = self._build_suppression_section(data.suppression_summary)
         footer_html = self._build_footer()
 
         return _PAGE_TEMPLATE.safe_substitute(
             title=_escape(title),
             summary_html=summary_html,
-            findings_html=findings_html,
+            findings_html=findings_html + suppression_html,
             footer_html=footer_html,
         )
 
@@ -476,6 +478,56 @@ class HtmlFormatter:
 
         parts.append("</tbody></table>")
         parts.append("</div>")
+        return "\n".join(parts)
+
+    def _build_suppression_section(
+        self, suppression_summary: SuppressionSummary | None
+    ) -> str:
+        """Build a collapsible suppression section for hunt/full-scan output.
+
+        Returns an empty string when suppression_summary is None or when
+        no findings were suppressed.
+        """
+        if suppression_summary is None or suppression_summary.suppressed_count == 0:
+            return ""
+
+        ss = suppression_summary
+        expired_note = (
+            f" ({ss.expired_rules} expired)" if ss.expired_rules > 0 else ""
+        )
+        parts = [
+            '<div class="findings" style="margin-top: 20px;">',
+            "<details>",
+            (
+                f"<summary><strong>Suppressions: "
+                f"{ss.suppressed_count} finding(s) suppressed "
+                f"({ss.total_rules} rule(s){expired_note})</strong></summary>"
+            ),
+        ]
+
+        if ss.suppression_reasons:
+            parts.append('<table class="findings-table" style="margin-top: 10px;">')
+            parts.append(
+                "<thead><tr>"
+                "<th>Finding ID</th>"
+                "<th>Suppression Reason</th>"
+                "</tr></thead>"
+            )
+            parts.append("<tbody>")
+            for finding_id, reason in ss.suppression_reasons.items():
+                parts.append("<tr>")
+                parts.append(f"<td>{_escape(finding_id)}</td>")
+                parts.append(f"<td>{_escape(reason)}</td>")
+                parts.append("</tr>")
+            parts.append("</tbody></table>")
+
+        if ss.suppression_file:
+            parts.append(
+                f'<p style="margin-top: 8px; color: #666; font-size: 0.9em;">'
+                f"Suppression file: {_escape(ss.suppression_file)}</p>"
+            )
+
+        parts.extend(["</details>", "</div>"])
         return "\n".join(parts)
 
     def _build_footer(self) -> str:
