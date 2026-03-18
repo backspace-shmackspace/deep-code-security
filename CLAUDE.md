@@ -18,6 +18,7 @@ Exposed via MCP server (native stdio, not containerized) and unified CLI.
 src/deep_code_security/
     shared/          # File discovery, language detection, config, JSON output
         formatters/  # Unified formatter registry (text, json, sarif, html)
+        suppressions.py  # .dcs-suppress.yaml loading and matching
     hunter/          # Phase 1: tree-sitter parse -> taint track -> RawFinding[]
     auditor/         # Phase 2: exploit generation -> sandbox exec -> VerifiedFinding[]
     architect/       # Phase 3: context gather -> guidance -> RemediationGuidance[]
@@ -154,4 +155,7 @@ Note: Podman (not Docker) is used for the fuzzer container backend. Run
 - `models.py` per phase -- all Pydantic models
 - `orchestrator.py` per phase -- entry point coordinating subcomponents
 - Registries in `registries/` YAML files, never hardcoded in Python
-- Test fixtures in `tests/fixtures/vulnerable_samples/` and `tests/fixtures/safe_samples/`
+- Suppression file always named `.dcs-suppress.yaml` in project root, loaded
+  via `shared/suppressions.py`
+- Test fixtures in `tests/fixtures/vulnerable_samples/` and
+  `tests/fixtures/safe_samples/`

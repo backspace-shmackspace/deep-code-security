@@ -17,6 +17,7 @@ pip install -e ".[dev,fuzz]"
 
 # Static analysis via CLI
 dcs hunt /path/to/project
+dcs hunt /path/to/project --ignore-suppressions
 dcs verify --finding-ids <id1> <id2>
 
 # Dynamic analysis (fuzzing) via CLI
@@ -67,6 +68,41 @@ FUZZER     LLM-guided input generation → sandboxed execution →
 - Python (Flask, Django patterns)
 - Go (net/http, database/sql patterns)
 - C (stretch goal — basic argv/stdin patterns)
+
+### Suppression Files
+
+You can suppress specific findings by creating a `.dcs-suppress.yaml` file
+in your project root. This is useful for marking false positives, accepted
+risks, or findings that will be addressed later.
+
+**Basic usage:**
+
+```yaml
+# .dcs-suppress.yaml
+version: 1
+suppressions:
+  - rule: CWE-22
+    file: "src/config/*.py"
+    reason: "Config paths are admin-controlled"
+
+  - rule: CWE-89
+    file: "src/legacy/db.py"
+    line: 145
+    reason: "Legacy code scheduled for refactor in Q2"
+```
+
+**CLI flags:**
+- By default, suppressions are applied during `dcs hunt`, `dcs full-scan`,
+  and `dcs hunt-fuzz` commands
+- Use `--ignore-suppressions` to bypass the suppression file and show all
+  findings
+
+**Notes:**
+- Suppression files only affect SAST findings, not fuzzer crashes
+- The file must be named `.dcs-suppress.yaml` and located in the project
+  root
+- All formatters (text, JSON, SARIF, HTML) show suppression statistics in
+  their output
 
 ## Installation
 
