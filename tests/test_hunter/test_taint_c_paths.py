@@ -466,3 +466,565 @@ void foo(int argc, char *argv[]) {
         assert "field_expression" in all_types
         assert "cast_expression" in all_types
         assert "assignment_expression" in all_types
+
+
+class TestConditionalSanitizer:
+    """Tests for conditional bounds-check sanitizer detection in C taint tracking."""
+
+    def test_if_clamp_sanitizes_memcpy(self, c_engine, c_parser) -> None:
+        """If-clamp on tainted var marks it sanitized for memory_corruption (OpenSSL passphrase.c pattern)."""
+        code = """\
+#include <string.h>
+void copy(char *dst, int dst_size, char *src) {
+    int src_len = strlen(src);
+    if (src_len > dst_size) src_len = dst_size;
+    memcpy(dst, src, src_len);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        step = TaintStep(file="/test.c", line=3, column=4, variable="src_len", transform="source")
+        state.add_taint("src_len", step)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        assert state.is_sanitized_for("src_len", "memory_corruption"), (
+            "Expected src_len to be sanitized for memory_corruption after if-clamp"
+        )
+
+        # End-to-end: verify finding is marked sanitized.
+        # Use argv/atoi as source (registered in c.yaml) so find_taint_paths has a source.
+        e2e_code = """\
+#include <string.h>
+#include <stdlib.h>
+void copy_e2e(char *dst, int argc, char *argv[]) {
+    int n = atoi(argv[1]);
+    if (n > 64) n = 64;
+    char src[128];
+    memcpy(dst, src, n);
+}
+"""
+        e2e_tree = c_parser.parse_string(e2e_code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(e2e_tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(e2e_tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(e2e_tree, sources, sinks, "/test.c")
+        size_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+        ]
+        assert len(size_paths) >= 1, "Expected at least one size-related taint path"
+        for src, sink, tp in size_paths:
+            assert tp.sanitized, f"Expected finding at line {sink.line} to be sanitized"
+            assert tp.sanitizer == "conditional_bounds_check", (
+                f"Expected sanitizer='conditional_bounds_check', got '{tp.sanitizer}'"
+            )
+
+    def test_ternary_clamp_sanitizes(self, c_engine, c_parser) -> None:
+        """Ternary clamp on tainted var marks it sanitized for memory_corruption (OpenSSL pem_lib.c pattern)."""
+        code = """\
+#include <string.h>
+void copy_data(char *buf, int num, char *userdata) {
+    int i = strlen(userdata);
+    i = (i > num) ? num : i;
+    memcpy(buf, userdata, i);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        step = TaintStep(file="/test.c", line=3, column=4, variable="i", transform="source")
+        state.add_taint("i", step)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        assert state.is_sanitized_for("i", "memory_corruption"), (
+            "Expected i to be sanitized for memory_corruption after ternary clamp"
+        )
+
+        # End-to-end: verify finding is marked sanitized.
+        # Use argv/atoi as source (registered in c.yaml) so find_taint_paths has a source.
+        e2e_code = """\
+#include <string.h>
+#include <stdlib.h>
+void copy_data_e2e(char *buf, int argc, char *argv[]) {
+    int i = atoi(argv[1]);
+    i = (i > 64) ? 64 : i;
+    char src[128];
+    memcpy(buf, src, i);
+}
+"""
+        e2e_tree = c_parser.parse_string(e2e_code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(e2e_tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(e2e_tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(e2e_tree, sources, sinks, "/test.c")
+        size_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+        ]
+        assert len(size_paths) >= 1, "Expected at least one size-related taint path"
+        for src, sink, tp in size_paths:
+            assert tp.sanitized, f"Expected finding at line {sink.line} to be sanitized"
+            assert tp.sanitizer == "conditional_bounds_check", (
+                f"Expected sanitizer='conditional_bounds_check', got '{tp.sanitizer}'"
+            )
+
+    def test_ternary_max_not_sanitized(self, c_engine, c_parser) -> None:
+        """MAX ternary pattern (F-2 anti-pattern) is NOT recognized as a clamp -- finding remains unsanitized."""
+        code = """\
+#include <string.h>
+#include <stdlib.h>
+void bad_max(char *buf, int num, char *userdata) {
+    int i = atoi(userdata);
+    i = (i > num) ? i : num;
+    memcpy(buf, userdata, i);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(tree, sources, sinks, "/test.c")
+        # Should find at least one path (i -> memcpy)
+        assert len(paths) >= 1, "Expected at least one taint path for the MAX pattern"
+        # None of the paths for memory_corruption / buffer_overflow category should be sanitized
+        size_sink_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+        ]
+        if size_sink_paths:
+            for src, sink, tp in size_sink_paths:
+                assert not tp.sanitized, (
+                    f"Expected MAX ternary NOT to sanitize finding at line {sink.line}"
+                )
+
+    def test_if_clamp_no_sanitize_for_command_injection(self, c_engine, c_parser) -> None:
+        """Bounds-checking len does NOT sanitize system(cmd) -- CWE-78 is not in the sanitizable category set."""
+        code = """\
+#include <string.h>
+#include <stdlib.h>
+void run(int argc, char *argv[]) {
+    char *cmd = argv[1];
+    int len = strlen(cmd);
+    if (len > 255) len = 255;
+    system(cmd);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(tree, sources, sinks, "/test.c")
+        # There should be at least one path from argv to system
+        assert len(paths) >= 1, "Expected at least one taint path from argv to system"
+        # The command_injection finding for system(cmd) must NOT be sanitized
+        cmd_injection_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category == "command_injection"
+        ]
+        assert len(cmd_injection_paths) >= 1, "Expected a command_injection finding"
+        for src, sink, tp in cmd_injection_paths:
+            assert not tp.sanitized, (
+                f"Expected command_injection finding at line {sink.line} to NOT be sanitized "
+                "even though len was bounds-checked"
+            )
+
+    def test_same_var_bounds_check_no_sanitize_for_injection(self, c_engine, c_parser) -> None:
+        """CWE-category filtering: val is sanitized for buffer_overflow but NOT for command_injection."""
+        code = """\
+#include <stdlib.h>
+#include <stdio.h>
+void run2(int argc, char *argv[]) {
+    int val = atoi(argv[1]);
+    if (val > 255) val = 255;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%d", val);
+    system(cmd);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        step = TaintStep(file="/test.c", line=4, column=4, variable="val", transform="source")
+        state.add_taint("val", step)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        # val IS sanitized for size-related categories
+        assert state.is_sanitized_for("val", "buffer_overflow"), (
+            "Expected val to be sanitized for buffer_overflow"
+        )
+        assert state.is_sanitized_for("val", "memory_corruption"), (
+            "Expected val to be sanitized for memory_corruption"
+        )
+        # val is NOT sanitized for command_injection
+        assert not state.is_sanitized_for("val", "command_injection"), (
+            "Expected val to NOT be sanitized for command_injection"
+        )
+
+    def test_genuine_vuln_not_sanitized(self, c_engine, c_parser) -> None:
+        """memcpy without any bounds check on tainted size is correctly flagged as unsanitized."""
+        code = """\
+#include <string.h>
+#include <stdlib.h>
+void copy_bad(int argc, char *argv[]) {
+    int size = atoi(argv[1]);
+    char dst[64];
+    memcpy(dst, "hello", size);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(tree, sources, sinks, "/test.c")
+        assert len(paths) >= 1, "Expected at least one taint path for unbounded memcpy"
+        # No finding should be sanitized -- there is no bounds check
+        for src, sink, tp in paths:
+            if sink.category in ("memory_corruption", "buffer_overflow"):
+                assert not tp.sanitized, (
+                    f"Expected genuine vuln at line {sink.line} to NOT be sanitized"
+                )
+
+    def test_if_clamp_with_braces(self, c_engine, c_parser) -> None:
+        """If-clamp with compound_statement body (braces) is also recognized as a sanitizer."""
+        code = """\
+#include <string.h>
+void copy_braced(char *dst, int dst_size, char *src) {
+    int src_len = strlen(src);
+    if (src_len > dst_size) { src_len = dst_size; }
+    memcpy(dst, src, src_len);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        step = TaintStep(file="/test.c", line=3, column=4, variable="src_len", transform="source")
+        state.add_taint("src_len", step)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        assert state.is_sanitized_for("src_len", "memory_corruption"), (
+            "Expected src_len to be sanitized for memory_corruption with braced if-clamp body"
+        )
+
+        # End-to-end: verify finding is marked sanitized (braced body variant).
+        # Use argv/atoi as source (registered in c.yaml) so find_taint_paths has a source.
+        e2e_code = """\
+#include <string.h>
+#include <stdlib.h>
+void copy_braced_e2e(char *dst, int argc, char *argv[]) {
+    int n = atoi(argv[1]);
+    if (n > 64) { n = 64; }
+    char src[128];
+    memcpy(dst, src, n);
+}
+"""
+        e2e_tree = c_parser.parse_string(e2e_code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(e2e_tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(e2e_tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(e2e_tree, sources, sinks, "/test.c")
+        size_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+        ]
+        assert len(size_paths) >= 1, "Expected at least one size-related taint path"
+        for src, sink, tp in size_paths:
+            assert tp.sanitized, f"Expected finding at line {sink.line} to be sanitized"
+            assert tp.sanitizer == "conditional_bounds_check", (
+                f"Expected sanitizer='conditional_bounds_check', got '{tp.sanitizer}'"
+            )
+
+    def test_if_clamp_numeric_literal_bound(self, c_engine, c_parser) -> None:
+        """If-clamp with a numeric literal bound (e.g., 4096) is recognized as a sanitizer."""
+        code = """\
+#include <string.h>
+void copy_bounded(char *dst, char *src) {
+    int n = strlen(src);
+    if (n > 4096) n = 4096;
+    memcpy(dst, src, n);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        step = TaintStep(file="/test.c", line=3, column=4, variable="n", transform="source")
+        state.add_taint("n", step)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        assert state.is_sanitized_for("n", "memory_corruption"), (
+            "Expected n to be sanitized for memory_corruption after numeric-literal-bound if-clamp"
+        )
+
+        # End-to-end: verify finding is marked sanitized (numeric literal bound variant).
+        # Use argv/atoi as source (registered in c.yaml) so find_taint_paths has a source.
+        e2e_code = """\
+#include <string.h>
+#include <stdlib.h>
+void copy_bounded_e2e(char *dst, int argc, char *argv[]) {
+    int n = atoi(argv[1]);
+    if (n > 4096) n = 4096;
+    char src[4096];
+    memcpy(dst, src, n);
+}
+"""
+        e2e_tree = c_parser.parse_string(e2e_code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(e2e_tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(e2e_tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(e2e_tree, sources, sinks, "/test.c")
+        size_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+        ]
+        assert len(size_paths) >= 1, "Expected at least one size-related taint path"
+        for src, sink, tp in size_paths:
+            assert tp.sanitized, f"Expected finding at line {sink.line} to be sanitized"
+            assert tp.sanitizer == "conditional_bounds_check", (
+                f"Expected sanitizer='conditional_bounds_check', got '{tp.sanitizer}'"
+            )
+
+    def test_taint_state_sanitization_methods(self) -> None:
+        """Unit test TaintState.add_sanitization and is_sanitized_for directly."""
+        state = TaintState()
+        step = TaintStep(file="/test.c", line=1, column=0, variable="x", transform="source")
+        state.add_taint("x", step)
+
+        # Before sanitization
+        assert not state.is_sanitized_for("x", "buffer_overflow")
+        assert not state.is_sanitized_for("x", "memory_corruption")
+
+        state.add_sanitization("x", {"buffer_overflow", "memory_corruption"})
+
+        # After sanitization
+        assert state.is_sanitized_for("x", "buffer_overflow")
+        assert state.is_sanitized_for("x", "memory_corruption")
+        # Untouched categories remain unsanitized
+        assert not state.is_sanitized_for("x", "command_injection")
+        assert not state.is_sanitized_for("x", "integer_overflow")
+
+        # Untainted variable: add_sanitization has no effect
+        state.add_sanitization("y", {"buffer_overflow"})
+        assert not state.is_sanitized_for("y", "buffer_overflow")
+
+    def test_taint_state_copy_isolates_sanitization(self) -> None:
+        """TaintState.copy() produces an independent sanitization state -- mutations do not cross-contaminate."""
+        state = TaintState()
+        step = TaintStep(file="/test.c", line=1, column=0, variable="n", transform="source")
+        state.add_taint("n", step)
+        state.add_sanitization("n", {"buffer_overflow"})
+
+        copied = state.copy()
+
+        # Both start with the same sanitization
+        assert copied.is_sanitized_for("n", "buffer_overflow")
+
+        # Mutate the copy -- original must be unaffected
+        copied.sanitized_vars["n"].add("memory_corruption")
+        assert not state.is_sanitized_for("n", "memory_corruption"), (
+            "Original state should not be affected by mutations to the copy's sanitized_vars"
+        )
+
+        # Mutate the original -- copy must be unaffected
+        state.add_sanitization("n", {"integer_overflow"})
+        assert not copied.is_sanitized_for("n", "integer_overflow"), (
+            "Copy should not be affected by mutations to the original's sanitized_vars"
+        )
+
+    def test_if_clamp_untainted_var_no_effect(self, c_engine, c_parser) -> None:
+        """An if-clamp on a non-tainted variable does NOT add sanitization to any variable."""
+        code = """\
+#include <string.h>
+void no_taint(char *dst, int max_size) {
+    int n = 100;
+    if (n > max_size) n = max_size;
+    memcpy(dst, "hello", n);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        # Deliberately do NOT taint "n" -- it holds a constant value
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        # No variable should be in sanitized_vars because none were tainted to begin with
+        assert not state.is_sanitized_for("n", "memory_corruption"), (
+            "Expected no sanitization for non-tainted variable n"
+        )
+        assert len(state.sanitized_vars) == 0, (
+            "Expected sanitized_vars to be empty when no tainted variable was if-clamped"
+        )
+
+    def test_retaint_after_sanitize_clears_sanitization(self, c_engine, c_parser) -> None:
+        """Re-assignment from a tainted source after sanitization clears the prior sanitization."""
+        code = """\
+#include <string.h>
+#include <stdlib.h>
+void retaint(int argc, char *argv[]) {
+    int n = atoi(argv[1]);
+    if (n > 64) n = 64;
+    n = atoi(argv[2]);
+    char dst[128];
+    memcpy(dst, "hello", n);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(tree, registry, lang_obj, "/test.c")
+
+        # Verify at the state level: seed n AND argv as tainted so that when
+        # _propagate_taint processes `n = atoi(argv[2])` it detects argv in the
+        # RHS, calls add_taint("n", ...) which clears the prior sanitization.
+        state = TaintState()
+        step1 = TaintStep(file="/test.c", line=4, column=4, variable="n", transform="source")
+        state.add_taint("n", step1)
+        step_argv = TaintStep(file="/test.c", line=3, column=0, variable="argv", transform="source")
+        state.add_taint("argv", step_argv)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        # After propagation through the if-clamp and subsequent re-taint, sanitization should be cleared
+        assert not state.is_sanitized_for("n", "memory_corruption"), (
+            "Expected sanitization to be cleared after re-taint of n"
+        )
+
+        # Also verify at the finding level: the memcpy finding should not be sanitized
+        paths = c_engine.find_taint_paths(tree, sources, sinks, "/test.c")
+        assert len(paths) >= 1, "Expected at least one taint path"
+        size_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+        ]
+        if size_paths:
+            for src, sink, tp in size_paths:
+                assert not tp.sanitized, (
+                    f"Expected finding at line {sink.line} to be unsanitized after re-taint"
+                )
+
+    def test_multi_var_only_clamped_var_sanitized(self, c_engine, c_parser) -> None:
+        """Sanitization is per-variable: clamping size_a does NOT sanitize size_b."""
+        code = """\
+#include <string.h>
+#include <stdlib.h>
+void multi_var(int argc, char *argv[]) {
+    int size_a = atoi(argv[1]);
+    int size_b = atoi(argv[2]);
+    if (size_a > 64) size_a = 64;
+    char dst[128];
+    memcpy(dst, "hello", size_b);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        step_a = TaintStep(file="/test.c", line=4, column=4, variable="size_a", transform="source")
+        step_b = TaintStep(file="/test.c", line=5, column=4, variable="size_b", transform="source")
+        state.add_taint("size_a", step_a)
+        state.add_taint("size_b", step_b)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+
+        # size_a was clamped -- it should be sanitized
+        assert state.is_sanitized_for("size_a", "memory_corruption"), (
+            "Expected size_a to be sanitized for memory_corruption after if-clamp"
+        )
+        # size_b was NOT clamped -- it must remain unsanitized
+        assert not state.is_sanitized_for("size_b", "memory_corruption"), (
+            "Expected size_b to NOT be sanitized (no bounds check applied to it)"
+        )
+
+        # End-to-end: the memcpy(dst, "hello", size_b) finding should be unsanitized
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(tree, sources, sinks, "/test.c")
+        size_b_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+            and any(step.variable == "size_b" for step in tp.steps)
+        ]
+        if size_b_paths:
+            for src, sink, tp in size_b_paths:
+                assert not tp.sanitized, (
+                    f"Expected size_b finding at line {sink.line} to be unsanitized"
+                )
+
+    def test_if_clamp_tainted_rhs_not_sanitized(self, c_engine, c_parser) -> None:
+        """If body reassigns to another tainted variable -- NOT a valid clamp, no sanitization."""
+        code = """\
+#include <string.h>
+#include <stdlib.h>
+void tainted_rhs(int argc, char *argv[]) {
+    int n = atoi(argv[1]);
+    int m = atoi(argv[2]);
+    if (n > m) n = m;
+    char dst[128];
+    memcpy(dst, "hello", n);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        step_n = TaintStep(file="/test.c", line=4, column=4, variable="n", transform="source")
+        step_m = TaintStep(file="/test.c", line=5, column=4, variable="m", transform="source")
+        state.add_taint("n", step_n)
+        state.add_taint("m", step_m)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        # n is NOT sanitized because the RHS m is also tainted
+        assert not state.is_sanitized_for("n", "memory_corruption"), (
+            "Expected n to NOT be sanitized when the if-body RHS (m) is itself tainted"
+        )
+
+    def test_ternary_min_idiom_sanitizes(self, c_engine, c_parser) -> None:
+        """Ternary min idiom (n < max) ? n : max is recognized as a clamp.
+
+        This covers the fixture function clamp_min_idiom in conditional_bounds.c.
+        Key difference from test_ternary_clamp_sanitizes: the tainted variable (n)
+        is on the LEFT of '<', and the clamped result is stored in a NEW variable (m),
+        not back into n itself.
+        """
+        code = """\
+#include <string.h>
+#include <stdlib.h>
+void copy_min(char *buf, int num, char *userdata) {
+    int i = strlen(userdata);
+    int m = (i < num) ? i : num;
+    memcpy(buf, userdata, m);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        state = TaintState()
+        # Seed i as tainted (the variable that flows into the ternary condition).
+        step = TaintStep(file="/test.c", line=3, column=4, variable="i", transform="source")
+        state.add_taint("i", step)
+        c_engine._propagate_taint(tree.root_node, state, "/test.c")
+        # m is the assignment target; the clamp assigns min(i, num) to m.
+        # m must be sanitized for memory_corruption because it is bounded above by num.
+        assert state.is_sanitized_for("m", "memory_corruption"), (
+            "Expected m to be sanitized for memory_corruption after ternary min idiom clamp"
+        )
+
+        # End-to-end: verify the finding for m -> memcpy is marked sanitized.
+        # Use argv/atoi as source (registered in c.yaml) so find_taint_paths has a source.
+        e2e_code = """\
+#include <string.h>
+#include <stdlib.h>
+void copy_min_e2e(int argc, char *argv[]) {
+    int n = atoi(argv[1]);
+    int limit = 64;
+    int m = (n < limit) ? n : limit;
+    char dst[128];
+    memcpy(dst, "hello", m);
+}
+"""
+        e2e_tree = c_parser.parse_string(e2e_code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(e2e_tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(e2e_tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(e2e_tree, sources, sinks, "/test.c")
+        # Filter for paths where the source variable is n (from atoi), not
+        # spurious matches from unfiltered tree-sitter query predicates.
+        size_paths = [
+            (src, sink, tp) for src, sink, tp in paths
+            if sink.category in ("memory_corruption", "buffer_overflow")
+            and tp.steps[0].variable in ("n", "argv")
+        ]
+        assert len(size_paths) >= 1, "Expected at least one size-related taint path from n/argv"
+        for src, sink, tp in size_paths:
+            assert tp.sanitized, f"Expected finding at line {sink.line} to be sanitized"
+            assert tp.sanitizer == "conditional_bounds_check", (
+                f"Expected sanitizer='conditional_bounds_check', got '{tp.sanitizer}'"
+            )

@@ -153,6 +153,7 @@ Note: Podman (not Docker) is used for the fuzzer container backend. Run
 7. **C output-parameter sources deferred** -- C source functions that deliver tainted data via output parameters (`recv`, `fread`, `read`, `scanf`, `getline`, `getdelim`) are not effective taint sources in v1. Only functions whose return value IS the tainted data (`argv`, `getenv`, `gets`, `fgets`) work correctly with the LHS-seeding taint engine. Deferred to a future plan increment that adds output-parameter taint summaries.
 8. **CWE-416 (use-after-free) detection deferred** -- requires temporal ordering analysis (tracking that `free(ptr)` precedes a subsequent use of `ptr`), which is fundamentally different from the source-to-sink taint model. Deferred to a future plan.
 9. **`mktemp()`/`tmpnam()` detection gap** -- registered as CWE-676 sinks, but the taint-flow pipeline requires a source-to-sink path. Most real-world uses call these with hardcoded template strings, so they will NOT be flagged.
+10. **C conditional assignment sanitizer -- partial coverage** -- the C hunter recognizes `if (n > max) n = max;` and ternary clamp variants (`n = (n > max) ? max : n;`) as sanitizers for CWE-119/CWE-120/CWE-190, downgrading confidence from "confirmed" to "likely". Macro-based clamps (e.g., `MIN(n, max)`), early-return guards (`if (n > max) return -1;`), and bitwise masks are NOT recognized and will not reduce confidence.
 
 ## File Conventions
 

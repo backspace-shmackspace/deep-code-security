@@ -49,6 +49,13 @@ _LANGUAGE_NODE_TYPES: dict[str, dict[str, list[str]]] = {
     },
 }
 
+# Categories that conditional bounds checks can sanitize
+_SIZE_SANITIZABLE_CATEGORIES: frozenset[str] = frozenset({
+    "buffer_overflow",    # CWE-120
+    "memory_corruption",  # CWE-119
+    "integer_overflow",   # CWE-190
+})
+
 
 @dataclass
 class TaintState:
@@ -58,9 +65,16 @@ class TaintState:
     tainted_vars: set[str] = field(default_factory=set)
     # Map from variable name to the step that tainted it
     taint_steps: dict[str, TaintStep] = field(default_factory=dict)
+    # Variables that have been conditionally sanitized.
+    # Maps variable name -> set of sink categories that are neutralized.
+    sanitized_vars: dict[str, set[str]] = field(default_factory=dict)
 
     def add_taint(self, var_name: str, step: TaintStep) -> None:
         """Mark a variable as tainted.
+
+        Clears any prior conditional sanitization for the variable,
+        because re-assignment from a tainted source invalidates the
+        previous bounds check.
 
         Args:
             var_name: Variable name to taint.
@@ -68,6 +82,31 @@ class TaintState:
         """
         self.tainted_vars.add(var_name)
         self.taint_steps[var_name] = step
+        # Clear stale sanitization: re-taint invalidates prior bounds check
+        self.sanitized_vars.pop(var_name, None)
+
+    def add_sanitization(self, var_name: str, categories: set[str]) -> None:
+        """Mark a tainted variable as conditionally sanitized for specific categories.
+
+        Args:
+            var_name: Variable name that has been bounds-checked.
+            categories: Sink categories that the bounds check neutralizes.
+        """
+        if var_name in self.tainted_vars:
+            existing = self.sanitized_vars.get(var_name, set())
+            self.sanitized_vars[var_name] = existing | categories
+
+    def is_sanitized_for(self, var_name: str, category: str) -> bool:
+        """Check if a variable is sanitized for a specific sink category.
+
+        Args:
+            var_name: Variable name to check.
+            category: Sink category to check against.
+
+        Returns:
+            True if the variable has been conditionally sanitized for this category.
+        """
+        return category in self.sanitized_vars.get(var_name, set())
 
     def is_tainted(self, var_name: str) -> bool:
         """Check if a variable is tainted.
@@ -81,10 +120,13 @@ class TaintState:
         return var_name in self.tainted_vars
 
     def copy(self) -> TaintState:
-        """Create a shallow copy of this taint state."""
+        """Create a deep copy of this taint state."""
         new_state = TaintState()
         new_state.tainted_vars = self.tainted_vars.copy()
         new_state.taint_steps = self.taint_steps.copy()
+        new_state.sanitized_vars = {
+            k: v.copy() for k, v in self.sanitized_vars.items()
+        }
         return new_state
 
 
@@ -354,6 +396,9 @@ class TaintEngine:
         This is a simplified single-pass propagation (not a full fixpoint).
         For v1, we do one forward pass through the AST.
 
+        For C, also processes if_statement nodes to detect conditional
+        bounds-check patterns (Pattern 1: if-statement clamp).
+
         Args:
             func_node: Function AST node.
             state: Mutable taint state to update.
@@ -366,6 +411,11 @@ class TaintEngine:
         def visit(node: Any) -> None:
             if node.type in assignment_types or node.type in aug_assignment_types:
                 self._handle_assignment(node, state, file_path, binary_op_types)
+            elif node.type == "if_statement" and self.language == Language.C:
+                self._handle_if_sanitizer(node, state)
+                # Still recurse into children to propagate taint through the body
+                for child in node.children:
+                    visit(child)
             else:
                 for child in node.children:
                     visit(child)
@@ -449,6 +499,18 @@ class TaintEngine:
                 )
                 state.add_taint(lhs_name, step)
 
+            # Pattern 2: Ternary clamp detection.
+            # Check AFTER add_taint (R-1 ordering: variable must be in tainted_vars
+            # for add_sanitization to take effect).
+            if rhs_node is not None and rhs_node.type == "conditional_expression":
+                if self.language == Language.C:
+                    clamped = self._check_ternary_clamp(rhs_node, state)
+                    if clamped:
+                        for lhs_name in lhs_names:
+                            state.add_sanitization(
+                                lhs_name, _SIZE_SANITIZABLE_CATEGORIES
+                            )
+
     def _node_to_var_name(self, node: Any) -> str | None:
         """Extract a variable name from a node.
 
@@ -482,6 +544,31 @@ class TaintEngine:
                 result = self._node_to_var_name(child)
                 if result:
                     return result
+        return None
+
+    def _node_to_comparison_operand(self, node: Any) -> str | None:
+        """Extract a comparison operand name from a node.
+
+        Like _node_to_var_name but also accepts number_literal nodes,
+        returning the literal text (e.g., "4096"). This is used only
+        for comparison extraction in conditional sanitizer recognition.
+
+        A number_literal operand is never tainted (it is a constant),
+        so it serves as a valid bound in a comparison like (n > 4096).
+
+        Args:
+            node: AST node.
+
+        Returns:
+            Variable name or literal string, or None.
+        """
+        # Try identifier extraction first
+        var_name = self._node_to_var_name(node)
+        if var_name is not None:
+            return var_name
+        # Accept number_literal as a bound operand
+        if node.type == "number_literal":
+            return node.text.decode("utf-8", errors="replace")
         return None
 
     def _is_rhs_tainted(
@@ -562,6 +649,274 @@ class TaintEngine:
 
         return "assignment"
 
+    def _handle_if_sanitizer(
+        self,
+        if_node: Any,
+        state: TaintState,
+    ) -> None:
+        """Check if an if-statement represents a conditional bounds check.
+
+        Pattern: if (tainted_var > bound) tainted_var = bound;
+
+        If matched, marks tainted_var as sanitized for size-related CWEs.
+
+        Args:
+            if_node: The if_statement AST node.
+            state: Mutable taint state.
+        """
+        # Extract condition and body from the if_statement
+        condition = None
+        body = None
+        for child in if_node.children:
+            if child.type == "parenthesized_expression":
+                condition = child
+            elif child.type in ("expression_statement", "compound_statement"):
+                body = child
+
+        if condition is None or body is None:
+            return
+
+        # Extract the binary comparison from the condition
+        cmp_info = self._extract_comparison(condition)
+        if cmp_info is None:
+            return
+        cmp_var, cmp_op, cmp_bound = cmp_info
+
+        # Check if the compared variable is tainted
+        if not state.is_tainted(cmp_var):
+            return
+
+        # Check if the body reassigns the compared variable to a non-tainted value
+        if not self._find_nontainted_reassignment_in_body(body, cmp_var, state):
+            return
+
+        # Pattern matches: tainted variable is bounds-checked and reassigned
+        state.add_sanitization(cmp_var, _SIZE_SANITIZABLE_CATEGORIES)
+
+    def _extract_comparison(
+        self, paren_node: Any
+    ) -> tuple[str, str, str] | None:
+        """Extract (variable, operator, bound) from a parenthesized comparison.
+
+        Handles: (n > max), (n >= max), (n < max), (n <= max)
+        Also handles numeric literal bounds: (n > 4096), (n >= sizeof(buf))
+        Also handles the reverse: (max < n) -> returned as-is (left, op, right).
+
+        Args:
+            paren_node: A parenthesized_expression AST node.
+
+        Returns:
+            Tuple of (left_name, operator, right_name) or None.
+        """
+        # Unwrap parenthesized_expression
+        binary = None
+        for child in paren_node.children:
+            if child.type == "binary_expression":
+                binary = child
+                break
+        if binary is None:
+            return None
+
+        # Extract left, operator, right
+        children = list(binary.children)
+        if len(children) != 3:
+            return None
+
+        left_node, op_node, right_node = children
+        op_text = op_node.text.decode("utf-8", errors="replace") if hasattr(op_node, 'text') else ""
+        if op_text not in (">", ">=", "<", "<="):
+            return None
+
+        left_name = self._node_to_comparison_operand(left_node)
+        right_name = self._node_to_comparison_operand(right_node)
+        if left_name is None or right_name is None:
+            return None
+
+        return (left_name, op_text, right_name)
+
+    def _extract_comparison_from_node(
+        self, node: Any
+    ) -> tuple[str, str, str] | None:
+        """Extract comparison info, handling both parenthesized and bare binary_expression.
+
+        Args:
+            node: A parenthesized_expression or binary_expression AST node.
+
+        Returns:
+            Tuple of (left_name, operator, right_name) or None.
+        """
+        if node.type == "parenthesized_expression":
+            return self._extract_comparison(node)
+        elif node.type == "binary_expression":
+            children = list(node.children)
+            if len(children) != 3:
+                return None
+            left, op, right = children
+            op_text = op.text.decode("utf-8", errors="replace") if hasattr(op, 'text') else ""
+            if op_text not in (">", ">=", "<", "<="):
+                return None
+            left_name = self._node_to_comparison_operand(left)
+            right_name = self._node_to_comparison_operand(right)
+            if left_name and right_name:
+                return (left_name, op_text, right_name)
+        return None
+
+    def _find_nontainted_reassignment_in_body(
+        self, body_node: Any, var_name: str, state: TaintState
+    ) -> bool:
+        """Check if the body of an if-statement reassigns the given variable
+        to a non-tainted value.
+
+        Handles both:
+          - expression_statement { assignment_expression { identifier = ... } }
+          - compound_statement { expression_statement { assignment_expression ... } }
+
+        Args:
+            body_node: The if-body AST node (expression_statement or compound_statement).
+            var_name: The variable name to look for on the LHS.
+            state: Current taint state (used to check RHS taintedness).
+
+        Returns:
+            True if the variable is reassigned to a non-tainted value.
+        """
+        def check_node(node: Any) -> bool:
+            if node.type == "assignment_expression":
+                lhs = self._extract_lhs_name(node)
+                if lhs == var_name:
+                    # Verify the RHS is not tainted
+                    rhs = self._extract_assignment_rhs(node)
+                    if rhs is not None and not self._is_rhs_tainted(
+                        rhs, state, []
+                    ):
+                        return True
+                    # RHS is tainted or could not be extracted -- not a valid clamp
+                    return False
+            for child in node.children:
+                if check_node(child):
+                    return True
+            return False
+
+        return check_node(body_node)
+
+    def _extract_assignment_rhs(self, assign_node: Any) -> Any | None:
+        """Extract the RHS node from an assignment expression.
+
+        For `n = max`, returns the node for `max`.
+        For `n = max - 1`, returns the node for `max - 1`.
+
+        Args:
+            assign_node: An assignment_expression AST node.
+
+        Returns:
+            The RHS AST node, or None if it cannot be extracted.
+        """
+        children = list(assign_node.children)
+        # assignment_expression children: [lhs, "=", rhs]
+        for i, child in enumerate(children):
+            if hasattr(child, 'text') and child.type not in (
+                "identifier", "pointer_declarator", "subscript_expression",
+                "field_expression",
+            ):
+                text = child.text.decode("utf-8", errors="replace") if hasattr(child, 'text') else ""
+                if text in ("=", "+=", "-=", "*=", "/="):
+                    # Return the node after the operator
+                    if i + 1 < len(children):
+                        return children[i + 1]
+        return None
+
+    def _check_ternary_clamp(
+        self, cond_expr: Any, state: TaintState
+    ) -> bool:
+        """Check if a conditional_expression is a min/max clamp pattern.
+
+        Patterns (clamp to upper bound):
+            (tainted > bound) ? bound : tainted  -> clamp: true branch is bound
+            (tainted < bound) ? tainted : bound   -> clamp: false branch is bound
+
+        Anti-patterns (NOT a clamp -- these are MAX operations):
+            (tainted > bound) ? tainted : bound  -> MAX: true branch is tainted
+            (tainted < bound) ? bound : tainted   -> MAX: false branch is tainted
+
+        The key invariant: in the "overflow" branch (when the tainted variable
+        exceeds the bound), the result must be the bound, not the tainted variable.
+
+        Args:
+            cond_expr: A conditional_expression AST node.
+            state: Current taint state.
+
+        Returns:
+            True if this is a bounds clamp involving a tainted variable.
+        """
+        children = list(cond_expr.children)
+        # conditional_expression children:
+        # [condition, "?", true_branch, ":", false_branch]
+        # condition may be parenthesized_expression or binary_expression
+
+        # Find semantic children (skip punctuation)
+        semantic = [c for c in children if c.type not in ("?", ":")]
+        if len(semantic) != 3:
+            return False
+        condition, true_branch, false_branch = semantic
+
+        # Extract comparison from condition
+        cmp_info = self._extract_comparison_from_node(condition)
+        if cmp_info is None:
+            return False
+        cmp_var, cmp_op, cmp_bound = cmp_info
+
+        # Determine which operand is tainted
+        var_is_tainted = state.is_tainted(cmp_var)
+        bound_is_tainted = state.is_tainted(cmp_bound)
+
+        # Exactly one must be tainted for this to be a meaningful clamp
+        if not var_is_tainted and not bound_is_tainted:
+            return False
+        # If both are tainted, we cannot determine which is the bound
+        if var_is_tainted and bound_is_tainted:
+            return False
+
+        # Identify the tainted operand and the bound operand
+        tainted_name = cmp_var if var_is_tainted else cmp_bound
+        bound_name = cmp_bound if var_is_tainted else cmp_var
+
+        # Get branch values
+        true_name = self._node_to_comparison_operand(true_branch)
+        false_name = self._node_to_comparison_operand(false_branch)
+
+        if true_name is None or false_name is None:
+            return False
+
+        # Verify branch ordering is consistent with a clamp, not a MAX.
+        #
+        # For (tainted > bound) or (tainted >= bound):
+        #   Clamp: true_branch=bound, false_branch=tainted
+        #   MAX:   true_branch=tainted, false_branch=bound  (NOT a clamp)
+        #
+        # For (tainted < bound) or (tainted <= bound):
+        #   Clamp: true_branch=tainted, false_branch=bound
+        #   MAX:   true_branch=bound, false_branch=tainted  (NOT a clamp)
+        #
+        # If the tainted variable is on the RIGHT of the comparison
+        # (bound < tainted), the operator sense is inverted.
+        if var_is_tainted:
+            # tainted is on the left: (tainted OP bound)
+            if cmp_op in (">", ">="):
+                # Overflow branch is "then". Then-branch must be bound.
+                return true_name == bound_name and false_name == tainted_name
+            else:  # < or <=
+                # Overflow branch is "else". Else-branch must be bound.
+                return true_name == tainted_name and false_name == bound_name
+        else:
+            # tainted is on the right: (bound OP tainted)
+            # (bound > tainted) means tainted is small -- this is the
+            # "underflow" direction. (bound < tainted) means tainted exceeds.
+            if cmp_op in ("<", "<="):
+                # bound < tainted: overflow branch is "then". Then = bound.
+                return true_name == bound_name and false_name == tainted_name
+            else:  # > or >=
+                # bound > tainted: tainted is small. Then = tainted, else = bound.
+                return true_name == tainted_name and false_name == bound_name
+
     def _check_sink_reachability(
         self,
         func_node: Any,
@@ -583,18 +938,22 @@ class TaintEngine:
         # Find the AST node at the sink's line
         sink_node = self._find_node_at_line(func_node, sink.line)
         if sink_node is None:
-            # No AST node found at sink line — cannot confirm taint reaches sink.
+            # No AST node found at sink line -- cannot confirm taint reaches sink.
             # Returning True here would produce false positives (any tainted var
             # in the function would be flagged regardless of whether it flows to
             # the sink arguments). Return False conservatively.
             return False, [], None
 
-        # Check if the sink call's arguments contain tainted variables
+        # Primary path: structured argument analysis
         tainted_arg, sanitizer = self._check_args_for_taint(
             sink_node, state, sink.category
         )
 
         if tainted_arg is not None:
+            # Check for conditional sanitization from taint state
+            if sanitizer is None and state.is_sanitized_for(tainted_arg, sink.category):
+                sanitizer = "conditional_bounds_check"
+
             sink_step = TaintStep(
                 file=file_path,
                 line=sink.line,
@@ -604,12 +963,16 @@ class TaintEngine:
             )
             return True, [sink_step], sanitizer
 
-        # Additional check: look for direct source patterns in args
-        # This handles cases where the source appears directly as a sink arg
-        # without being assigned to a variable first
+        # Fallback path: substring match for direct source patterns in args.
+        # This path MUST also check conditional sanitization (F-1 fix).
         for tainted_var in state.tainted_vars:
             node_text = sink_node.text.decode("utf-8", errors="replace") if sink_node else ""
             if tainted_var in node_text:
+                # Check conditional sanitization on the fallback path
+                fallback_sanitizer = None
+                if state.is_sanitized_for(tainted_var, sink.category):
+                    fallback_sanitizer = "conditional_bounds_check"
+
                 sink_step = TaintStep(
                     file=file_path,
                     line=sink.line,
@@ -617,7 +980,7 @@ class TaintEngine:
                     variable=tainted_var,
                     transform="sink_argument",
                 )
-                return True, [sink_step], None
+                return True, [sink_step], fallback_sanitizer
 
         return False, [], None
 
