@@ -149,6 +149,10 @@ Note: Podman (not Docker) is used for the fuzzer container backend. Run
 3. **PoC verification is bonus-only** -- most template PoCs fail due to missing execution context. This is expected.
 4. **No cross-language taint** -- Python calling C via FFI is not analyzed.
 5. **Fuzzer `_worker.py` uses `eval()`** -- justified deviation from CLAUDE.md eval() ban. Dual-layer AST validation (response_parser.py + _worker.py) with restricted globals provides defense in depth. See SD-02 in `plans/merge-fuzzy-wuzzy.md`.
+6. **C language support** -- intraprocedural taint only (same as Python/Go). No preprocessor resolution (`#ifdef` guards are invisible to the scanner). No struct member taint tracking. Pointer aliasing is tracked within the same function only.
+7. **C output-parameter sources deferred** -- C source functions that deliver tainted data via output parameters (`recv`, `fread`, `read`, `scanf`, `getline`, `getdelim`) are not effective taint sources in v1. Only functions whose return value IS the tainted data (`argv`, `getenv`, `gets`, `fgets`) work correctly with the LHS-seeding taint engine. Deferred to a future plan increment that adds output-parameter taint summaries.
+8. **CWE-416 (use-after-free) detection deferred** -- requires temporal ordering analysis (tracking that `free(ptr)` precedes a subsequent use of `ptr`), which is fundamentally different from the source-to-sink taint model. Deferred to a future plan.
+9. **`mktemp()`/`tmpnam()` detection gap** -- registered as CWE-676 sinks, but the taint-flow pipeline requires a source-to-sink path. Most real-world uses call these with hardcoded template strings, so they will NOT be flagged.
 
 ## File Conventions
 

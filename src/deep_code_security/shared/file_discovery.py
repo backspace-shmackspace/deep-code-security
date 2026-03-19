@@ -54,6 +54,8 @@ class FileDiscovery:
             ".mypy_cache",
             ".pytest_cache",
             ".ruff_cache",
+            ".deps",
+            ".libs",
         }
     )
 

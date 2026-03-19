@@ -335,6 +335,15 @@ class TaintEngine:
                     first = child.children[0]
                     if first.type == "identifier":
                         return first.text.decode("utf-8", errors="replace")
+            # C-specific: pointer_declarator wraps the identifier
+            # e.g., char *p = recv(...) has init_declarator children
+            # [pointer_declarator, "=", call_expression]
+            if child.type == "pointer_declarator":
+                return self._node_to_var_name(child)
+            # C-specific: subscript_expression on LHS
+            # e.g., buf[i] = tainted has subscript_expression
+            if child.type == "subscript_expression":
+                return self._node_to_var_name(child)
         return None
 
     def _propagate_taint(
@@ -454,6 +463,25 @@ class TaintEngine:
         # Go: qualified identifier
         if node.type in ("qualified_type", "type_identifier"):
             return node.text.decode("utf-8", errors="replace")
+        # C-specific: unwrap pointer_declarator to get the actual identifier
+        if node.type == "pointer_declarator":
+            for child in node.children:
+                if child.type == "identifier":
+                    return child.text.decode("utf-8", errors="replace")
+                # Recursive: pointer to pointer (char **pp)
+                if child.type == "pointer_declarator":
+                    return self._node_to_var_name(child)
+        # C-specific: array subscript -- extract base array name
+        if node.type == "subscript_expression":
+            for child in node.children:
+                if child.type == "identifier":
+                    return child.text.decode("utf-8", errors="replace")
+        # C-specific: parenthesized expression -- unwrap
+        if node.type == "parenthesized_expression":
+            for child in node.children:
+                result = self._node_to_var_name(child)
+                if result:
+                    return result
         return None
 
     def _is_rhs_tainted(
@@ -474,7 +502,7 @@ class TaintEngine:
             return state.is_tainted(var_name)
 
         # Check for source pattern references (e.g., attribute like request.form)
-        if node.type in ("attribute", "selector_expression", "member_expression"):
+        if node.type in ("attribute", "selector_expression", "member_expression", "field_expression"):
             node_text = node.text.decode("utf-8", errors="replace")
             # Check if any tainted "function" (source pattern) appears in the text
             for tainted_var in state.tainted_vars:
@@ -519,6 +547,18 @@ class TaintEngine:
 
         if rhs_node.type in ("call", "call_expression"):
             return "function_call"
+
+        # C-specific: type cast propagates taint
+        if rhs_node.type == "cast_expression":
+            return "type_cast"
+
+        # C-specific: pointer dereference propagates taint
+        if rhs_node.type == "pointer_expression":
+            return "pointer_dereference"
+
+        # C-specific: array access propagates taint
+        if rhs_node.type == "subscript_expression":
+            return "array_access"
 
         return "assignment"
 

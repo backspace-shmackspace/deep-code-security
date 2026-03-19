@@ -396,8 +396,10 @@ def _cwe_name(cwe: str) -> str:
         "CWE-89": "SQL Injection",
         "CWE-94": "Code Injection",
         "CWE-22": "Path Traversal",
+        "CWE-119": "Improper Restriction of Operations within the Bounds of a Memory Buffer",
         "CWE-134": "Uncontrolled Format String",
         "CWE-120": "Buffer Copy without Checking Size",
+        "CWE-190": "Integer Overflow or Wraparound",
         "CWE-676": "Use of Potentially Dangerous Function",
         "CWE-79": "Cross-site Scripting",
     }
