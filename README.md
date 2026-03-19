@@ -63,11 +63,12 @@ FUZZER     LLM-guided input generation → sandboxed execution →
            Output: CrashReport[] (JSON, with reproducer inputs)
 ```
 
-### Supported Languages (v1)
+## Supported Languages (v1)
 
 - Python (Flask, Django patterns)
 - Go (net/http, database/sql patterns)
-- C (stretch goal — basic argv/stdin patterns)
+- C (command injection, buffer overflow, format string, memory corruption
+  patterns)
 
 ### Suppression Files
 
@@ -261,6 +262,34 @@ See `registries/README.md` for the YAML registry format documentation.
    installed and the `dcs-fuzz-python:latest` image is built via
    `make build-fuzz-sandbox`. CLI fuzzing supports both SubprocessBackend
    (rlimits-only) and ContainerBackend.
+
+8. **C language: no preprocessor resolution** — `#ifdef` guards and macro
+   expansions are invisible to the scanner. Code hidden behind conditional
+   compilation will not be analyzed.
+
+9. **C language: no struct member taint tracking** — taint does not propagate
+   through struct field assignments. Only scalar variables and direct pointer
+   dereferences are tracked.
+
+10. **C language: pointer aliasing tracked within same function only** —
+    intraprocedural constraint applies (same as limitation #1). Pointer
+    aliases passed to other functions are not tracked.
+
+11. **C language: output-parameter sources deferred** — C source functions
+    that deliver tainted data via output parameters (`recv`, `fread`, `read`,
+    `scanf`, `getline`, `getdelim`) are not effective taint sources in v1.
+    Only functions whose return value is the tainted data (`argv`, `getenv`,
+    `gets`, `fgets`) work correctly with the LHS-seeding taint engine.
+
+12. **C language: CWE-416 (use-after-free) detection deferred** — requires
+    temporal ordering analysis (tracking that `free(ptr)` precedes a
+    subsequent use of `ptr`), which is fundamentally different from the
+    source-to-sink taint model.
+
+13. **C language: `mktemp()`/`tmpnam()` detection gap** — registered as
+    CWE-676 sinks, but the taint-flow pipeline requires a source-to-sink
+    path. Most real-world uses call these with hardcoded template strings, so
+    they will NOT be flagged.
 
 ## Security Model
 
