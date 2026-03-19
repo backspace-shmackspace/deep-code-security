@@ -100,3 +100,6 @@ htmlcov/
 # Tree-sitter compiled grammars
 *.so
 parser.c
+
+# Temporary source checkouts for testing
+openssl/
