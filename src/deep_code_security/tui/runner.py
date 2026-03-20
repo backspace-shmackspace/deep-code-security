@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -236,10 +237,21 @@ class ScanRunner:
         start_time = time.monotonic()
         error_message = ""
 
+        # Build subprocess environment: add the report output directory to
+        # DCS_ALLOWED_PATHS so the CLI can write report files there.
+        env = os.environ.copy()
+        run_dir_str = str(self._run_dir.resolve())
+        existing = env.get("DCS_ALLOWED_PATHS", "")
+        if existing:
+            env["DCS_ALLOWED_PATHS"] = f"{existing},{run_dir_str}"
+        else:
+            env["DCS_ALLOWED_PATHS"] = run_dir_str
+
         self._process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
         # Stream stderr line-by-line
