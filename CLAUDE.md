@@ -29,7 +29,7 @@ src/deep_code_security/
         analyzer/    # Source code analysis, signature extraction
         corpus/      # Crash/interesting input storage, serialization
         coverage_tracking/  # Coverage delta computation
-        plugins/     # Language-specific target plugins (Python MVP)
+        plugins/     # Language-specific target plugins (Python, C)
         reporting/   # Crash deduplication
         replay/      # Re-execute saved crash inputs
     mcp/             # MCP server (BaseMCPServer, 6 tools always + deep_scan_fuzz and deep_scan_hunt_fuzz when Podman available, stdio transport)
@@ -46,8 +46,11 @@ tests/               # pytest suite (90%+ coverage required)
 ### Security (Non-Negotiable)
 - **Never `yaml.load()`** -- always `yaml.safe_load()`
 - **Never `eval()`, `exec()`, `os.system()`, `subprocess.run(shell=True)`** in production code
-  - Exception: `fuzzer/execution/_worker.py` uses `eval()` with restricted globals and
+  - Exception: Python fuzzer `fuzzer/execution/_worker.py` uses `eval()` with restricted globals and
     dual-layer AST validation. See Security Deviation SD-02 in `plans/merge-fuzzy-wuzzy.md`.
+  - Note: C fuzzer `fuzzer/execution/_c_worker.py` does NOT use `eval()` — it compiles C source
+    with gcc and runs the binary. The dual-layer validation applies to AST checks (prohibit
+    syscalls, shell execution), not expression evaluation.
 - **All subprocess calls use list-form arguments** (never shell=True)
 - **All file paths validated through `mcp/path_validator.py`** with DCS_ALLOWED_PATHS allowlist
 - **All container operations enforce full security policy**: seccomp + no-new-privileges + cap-drop=ALL
@@ -132,9 +135,12 @@ tests/               # pytest suite (90%+ coverage required)
 | `DCS_FUZZ_OUTPUT_DIR` | `./fuzzy-output` | Corpus and report output directory |
 | `DCS_FUZZ_CONSENT` | `false` | Pre-configured consent for CI (API transmission only) |
 | `DCS_FUZZ_GCP_REGION` | `us-east5` | GCP region for Vertex AI |
-| `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugin names |
+| `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugin names (default: python; set to python,c to enable both) |
 | `DCS_FUZZ_MCP_TIMEOUT` | `120` | Hard wall-clock timeout for MCP fuzz invocations |
 | `DCS_FUZZ_CONTAINER_IMAGE` | `dcs-fuzz-python:latest` | Podman image used by ContainerBackend for MCP fuzz runs |
+| `DCS_FUZZ_C_CONTAINER_IMAGE` | `dcs-fuzz-c:latest` | Podman image used by CContainerBackend for C fuzz runs |
+| `DCS_FUZZ_C_COMPILE_FLAGS` | `""` | Comma-separated gcc flags for C harness compilation |
+| `DCS_FUZZ_C_INCLUDE_PATHS` | `""` | Comma-separated include paths for C harness compilation |
 | `DCS_BRIDGE_MAX_TARGETS` | `10` | Max fuzz targets produced by the SAST-to-Fuzz bridge |
 | `DCS_OUTPUT_DIR` | `~/.dcs/reports/` | Root directory for TUI report storage (TUI-only, read by `tui/storage.py`) |
 
@@ -143,13 +149,16 @@ tests/               # pytest suite (90%+ coverage required)
 | Command | Description |
 |---------|-------------|
 | `make build-fuzz-sandbox` | Build the Podman worker image (`dcs-fuzz-python:latest`) |
+| `make build-fuzz-c-sandbox` | Build the C fuzzer Podman worker image (`dcs-fuzz-c:latest`) |
 | `make test-fuzzer` | Run fuzzer unit tests |
+| `make test-c-fuzzer` | Run C fuzzer plugin tests only |
 | `make test-tui` | Run TUI unit tests (requires `textual` installed) |
 | `make test-integration` | Run integration tests (requires Podman + image) |
 
 Note: Podman (not Docker) is used for the fuzzer container backend. Run
-`make build-fuzz-sandbox` before running integration tests or using the
-`deep_scan_fuzz` MCP tool.
+`make build-fuzz-sandbox` (Python fuzzer) and `make build-fuzz-c-sandbox`
+(C fuzzer) before running integration tests or using the `deep_scan_fuzz` /
+`deep_scan_hunt_fuzz` MCP tools with C targets.
 
 ## Known Limitations (v1)
 
@@ -157,13 +166,14 @@ Note: Podman (not Docker) is used for the fuzzer container backend. Run
 2. **Query brittleness** -- aliased imports (`req = request; req.form`), fully-qualified names (`flask.request.form`), and class attributes (`self.request.form`) are NOT matched. (Resolved when using the Semgrep backend -- Semgrep's pattern DSL handles aliased imports, fully-qualified names, and class attributes.)
 3. **PoC verification is bonus-only** -- most template PoCs fail due to missing execution context. This is expected.
 4. **No cross-language taint** -- Python calling C via FFI is not analyzed.
-5. **Fuzzer `_worker.py` uses `eval()`** -- justified deviation from CLAUDE.md eval() ban. Dual-layer AST validation (response_parser.py + _worker.py) with restricted globals provides defense in depth. See SD-02 in `plans/merge-fuzzy-wuzzy.md`.
+5. **Python fuzzer `_worker.py` uses `eval()`** -- justified deviation from CLAUDE.md eval() ban. Dual-layer AST validation (response_parser.py + _worker.py) with restricted globals provides defense in depth. See SD-02 in `plans/merge-fuzzy-wuzzy.md`.
 6. **C language support** -- intraprocedural taint only (same as Python/Go). No preprocessor resolution (`#ifdef` guards are invisible to the scanner). No struct member taint tracking. Pointer aliasing is tracked within the same function only.
 7. **C output-parameter sources deferred** -- C source functions that deliver tainted data via output parameters (`recv`, `fread`, `read`, `scanf`, `getline`, `getdelim`) are not effective taint sources in v1. Only functions whose return value IS the tainted data (`argv`, `getenv`, `gets`, `fgets`) work correctly with the LHS-seeding taint engine. Deferred to a future plan increment that adds output-parameter taint summaries.
 8. **CWE-416 (use-after-free) detection deferred** -- requires temporal ordering analysis (tracking that `free(ptr)` precedes a subsequent use of `ptr`), which is fundamentally different from the source-to-sink taint model. Deferred to a future plan.
 9. **`mktemp()`/`tmpnam()` detection gap** -- registered as CWE-676 sinks, but the taint-flow pipeline requires a source-to-sink path. Most real-world uses call these with hardcoded template strings, so they will NOT be flagged.
 10. **C conditional assignment sanitizer -- partial coverage** -- the C hunter recognizes `if (n > max) n = max;` and ternary clamp variants (`n = (n > max) ? max : n;`) as sanitizers for CWE-119/CWE-120/CWE-190, downgrading confidence from "confirmed" to "likely". Macro-based clamps (e.g., `MIN(n, max)`), early-return guards (`if (n > max) return -1;`), and bitwise masks are NOT recognized and will not reduce confidence.
 11. **Semgrep OSS taint paths are always synthetic two-step** -- Semgrep OSS does not emit `dataflow_trace` (Pro-only feature). All Semgrep findings have a synthetic two-step TaintPath (source + sink only, no intermediate variable traces), capping taint completeness score at 50. Tree-sitter findings with full paths score 100.
+12. **C fuzzer harness validation -- allowlist-based security model** -- The C fuzzer compiles and executes arbitrary C code generated by the AI model inside a Podman container with full seccomp enforcement (`sandbox/seccomp-fuzz-c.json`). Layer 1 (host-side) and Layer 2 (container-side) AST validation prohibit: `system()`, `popen()`, `exec*()` calls; network syscalls (`socket`, `connect`, `bind`, `listen`, `accept`); file operations outside the build tmpfs (`open`, `creat` with absolute paths); non-standard library includes (only `stdlib.h`, `string.h`, `stdint.h`, etc. allowed). Harness size capped at 64 KB. **This is NOT a sandbox escape prevention mechanism** — it is a defense-in-depth measure to reduce prompt injection risk. The Podman container with seccomp is the primary security boundary. See `_c_worker.py` lines 36-87 for validation constants and `sandbox/seccomp-fuzz-c.json` for syscall allowlist.
 
 ## File Conventions
 

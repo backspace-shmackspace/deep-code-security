@@ -65,10 +65,12 @@ FUZZER     LLM-guided input generation → sandboxed execution →
 
 ## Supported Languages (v1)
 
-- Python (Flask, Django patterns)
-- Go (net/http, database/sql patterns)
+- Python (Flask, Django patterns; SAST + fuzzing)
+- Go (net/http, database/sql patterns; SAST only)
 - C (command injection, buffer overflow, format string, memory corruption
-  patterns)
+  patterns; SAST + fuzzing). C fuzzing requires
+  `DCS_FUZZ_ALLOWED_PLUGINS=python,c` and AI-powered harness generation with
+  AddressSanitizer and gcov instrumentation.
 
 ### Suppression Files
 
@@ -120,7 +122,8 @@ pip install -e ".[dev,fuzz]"
 
 # Build sandbox images (requires Docker or Podman)
 make build-sandboxes        # Build auditor/architect sandbox images
-make build-fuzz-sandbox     # Build fuzzer sandbox image (Podman only)
+make build-fuzz-sandbox     # Build Python fuzzer sandbox image (Podman only)
+make build-fuzz-c-sandbox   # Build C fuzzer sandbox image (Podman only)
 ```
 
 ## MCP Configuration
@@ -181,9 +184,12 @@ For advanced tuning, additional variables are available:
 | `DCS_FUZZ_OUTPUT_DIR` | `./fuzzy-output` | Corpus and report output directory |
 | `DCS_FUZZ_CONSENT` | `false` | Pre-configured consent for CI |
 | `DCS_FUZZ_GCP_REGION` | `us-east5` | GCP region for Vertex AI |
-| `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugins |
+| `DCS_FUZZ_ALLOWED_PLUGINS` | `python` | Comma-separated allowlist of fuzzer plugins (default: python; set to python,c to enable both) |
 | `DCS_FUZZ_MCP_TIMEOUT` | `120` | Hard wall-clock timeout for MCP fuzz invocations |
 | `DCS_FUZZ_CONTAINER_IMAGE` | `dcs-fuzz-python:latest` | Podman image used by ContainerBackend for MCP fuzz runs |
+| `DCS_FUZZ_C_CONTAINER_IMAGE` | `dcs-fuzz-c:latest` | Podman image used by CContainerBackend |
+| `DCS_FUZZ_C_COMPILE_FLAGS` | `""` | Comma-separated gcc flags (e.g., `-O2,-march=native`) |
+| `DCS_FUZZ_C_INCLUDE_PATHS` | `""` | Comma-separated include paths for C harness compilation |
 
 ## MCP Tools
 
@@ -234,6 +240,7 @@ make test-auditor   # Auditor tests only
 make test-architect # Architect tests only
 make test-mcp       # MCP server tests only
 make test-fuzzer    # Fuzzer tests only
+make test-c-fuzzer  # C fuzzer plugin tests only
 make sast           # Security scan with bandit
 make security       # sast + pip-audit
 ```
@@ -293,6 +300,17 @@ See `registries/README.md` for the YAML registry format documentation.
     CWE-676 sinks, but the taint-flow pipeline requires a source-to-sink
     path. Most real-world uses call these with hardcoded template strings, so
     they will NOT be flagged.
+
+14. **C fuzzer harness validation is allowlist-based, not
+    sandbox-escape-proof** — The C fuzzer compiles and executes LLM-generated
+    C code inside a Podman container with seccomp enforcement. Dual-layer AST
+    validation prohibits dangerous syscalls and non-standard includes, but
+    this is a defense-in-depth measure, not a complete security boundary. The
+    primary isolation mechanism is the Podman container with `--network=none`,
+    `--read-only`, `--cap-drop=ALL`, and a custom seccomp profile
+    (`sandbox/seccomp-fuzz-c.json`). Prompt injection attacks that evade the
+    AST allowlist could still execute arbitrary code inside the container (but
+    not escape to the host).
 
 ## Security Model
 
