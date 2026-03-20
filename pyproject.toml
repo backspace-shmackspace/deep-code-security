@@ -40,6 +40,7 @@ fuzz = [
     "coverage>=7.0.0",
     "rich>=13.0.0",
 ]
+tui = ["textual>=0.70.0"]
 vertex = [
     "deep-code-security[fuzz]",
     "anthropic[vertex]>=0.25.0,<1.0.0",
@@ -116,6 +117,9 @@ omit = [
     "*/architect/impact_analyzer.py",
     # Fuzzer execution worker runs in isolated subprocess (tested via test_worker_validation)
     "*/fuzzer/execution/_worker.py",
+    # TUI Textual-dependent modules (require optional textual package)
+    "*/tui/app.py",
+    "*/tui/screens/*.py",
     # Bridge __init__.py is a pure re-export
     "*/bridge/__init__.py",
     # Fuzzer __init__.py files are re-exports only

@@ -1,6 +1,6 @@
 .PHONY: lint test test-hunter test-auditor test-architect test-mcp test-fuzzer \
-        test-bridge test-integration sast security build build-sandboxes build-fuzz-sandbox \
-        clean check-vendor install install-dev audit-deps
+        test-bridge test-tui test-integration sast security build build-sandboxes \
+        build-fuzz-sandbox clean check-vendor install install-dev audit-deps
 
 PYTHON := python3
 PYTEST := pytest
@@ -69,6 +69,12 @@ test-fuzzer:
 test-bridge:
 	$(PYTEST) $(TESTS)/test_bridge -v \
 		--cov=$(SRC)/bridge \
+		--cov-report=term-missing
+
+# Run TUI tests (requires textual installed)
+test-tui:
+	$(PYTEST) $(TESTS)/test_tui -v \
+		--cov=$(SRC)/tui \
 		--cov-report=term-missing
 
 # Run integration tests (requires Docker or Podman)

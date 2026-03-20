@@ -34,6 +34,8 @@ src/deep_code_security/
         replay/      # Re-execute saved crash inputs
     mcp/             # MCP server (BaseMCPServer, 6 tools always + deep_scan_fuzz and deep_scan_hunt_fuzz when Podman available, stdio transport)
         shared/      # Vendored from helper-mcps (BaseMCPServer base class)
+    tui/             # Interactive terminal UI (Textual). Wraps CLI via subprocess for scanning; formatter conversion uses shared.formatters directly
+        screens/     # Textual screen classes (target select, scan config, progress, results, history)
 registries/          # YAML source/sink definitions per language
 sandbox/             # Docker images for exploit execution
 tests/               # pytest suite (90%+ coverage required)
@@ -62,7 +64,7 @@ tests/               # pytest suite (90%+ coverage required)
 
 ### Testing
 - Run tests: `make test` (90%+ coverage required)
-- Per-component: `make test-hunter`, `make test-auditor`, `make test-architect`, `make test-mcp`, `make test-fuzzer`, `make test-bridge`
+- Per-component: `make test-hunter`, `make test-auditor`, `make test-architect`, `make test-mcp`, `make test-fuzzer`, `make test-bridge`, `make test-tui`
 - Integration: `make test-integration` (requires Docker/Podman)
 - Lint: `make lint`
 - Security scan: `make sast`
@@ -99,6 +101,7 @@ tests/               # pytest suite (90%+ coverage required)
 | `dcs corpus <corpus_dir>` | Inspect corpus contents |
 | `dcs fuzz-plugins` | List available fuzzer plugins |
 | `dcs report <output_dir>` | View saved fuzz reports |
+| `dcs tui` | Launch interactive terminal UI (requires `pip install deep-code-security[tui]`) |
 
 ## Environment Variables
 
@@ -133,6 +136,7 @@ tests/               # pytest suite (90%+ coverage required)
 | `DCS_FUZZ_MCP_TIMEOUT` | `120` | Hard wall-clock timeout for MCP fuzz invocations |
 | `DCS_FUZZ_CONTAINER_IMAGE` | `dcs-fuzz-python:latest` | Podman image used by ContainerBackend for MCP fuzz runs |
 | `DCS_BRIDGE_MAX_TARGETS` | `10` | Max fuzz targets produced by the SAST-to-Fuzz bridge |
+| `DCS_OUTPUT_DIR` | `~/.dcs/reports/` | Root directory for TUI report storage (TUI-only, read by `tui/storage.py`) |
 
 ## Development Commands
 
@@ -140,6 +144,7 @@ tests/               # pytest suite (90%+ coverage required)
 |---------|-------------|
 | `make build-fuzz-sandbox` | Build the Podman worker image (`dcs-fuzz-python:latest`) |
 | `make test-fuzzer` | Run fuzzer unit tests |
+| `make test-tui` | Run TUI unit tests (requires `textual` installed) |
 | `make test-integration` | Run integration tests (requires Podman + image) |
 
 Note: Podman (not Docker) is used for the fuzzer container backend. Run

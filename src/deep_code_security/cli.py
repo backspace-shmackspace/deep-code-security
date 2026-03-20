@@ -1122,5 +1122,22 @@ def _build_fuzz_report_result(
     )
 
 
+@cli.command()
+def tui() -> None:
+    """Launch the interactive TUI for deep-code-security."""
+    try:
+        from deep_code_security.tui.app import DCSApp
+    except ImportError:
+        click.echo(
+            "Error: TUI requires the 'textual' package. "
+            "Install with: pip install deep-code-security[tui]",
+            err=True,
+        )
+        sys.exit(1)
+
+    app = DCSApp()
+    app.run()
+
+
 if __name__ == "__main__":
     cli()
