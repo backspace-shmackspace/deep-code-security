@@ -77,7 +77,7 @@ class TargetSelectScreen(Screen):
         with Vertical(id="target-container"):
             yield Static("Select a scan target:", id="target-label")
             with Vertical(id="tree-container"):
-                yield DirectoryTree(str(Path.cwd()), id="dir-tree")
+                yield DirectoryTree("/", id="dir-tree")
             yield Input(
                 placeholder="Or type a path manually...",
                 id="path-input",
