@@ -137,3 +137,7 @@ class ScanStats(BaseModel):
         default_factory=list,
         description="IDs of findings suppressed by .dcs-suppress.yaml",
     )
+    scanner_backend: str = Field(
+        default="treesitter",
+        description="Scanner backend used: 'semgrep' or 'treesitter'",
+    )

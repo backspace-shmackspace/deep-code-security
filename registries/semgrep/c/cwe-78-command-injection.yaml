@@ -1,0 +1,36 @@
+rules:
+  - id: dcs.c.cwe-78.command-injection
+    message: >
+      User input from $SOURCE flows to a command execution function ($SINK).
+      Unsanitized input in system(), popen(), or exec* family calls enables
+      arbitrary OS command execution. Avoid passing user-controlled data to
+      these functions; use execv/execvp with a fixed program path and validated
+      argument list instead.
+    severity: ERROR
+    languages: [c]
+    mode: taint
+    # NOTE: Output-parameter sources (recv, fread, read, scanf, getline, getdelim)
+    # are NOT listed here per CLAUDE.md Known Limitation #7. Those functions deliver
+    # tainted data via a buffer argument, not their return value, and are not
+    # effective taint sources in the current LHS-seeding taint engine.
+    # Only return-value sources (argv, getenv, gets, fgets) are included.
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      source_category: user_input
+      source_function: argv
+      sink_category: command_injection
+      sink_function: system
+      dcs_severity: critical
+    pattern-sources:
+      - pattern: argv[...]
+      - pattern: getenv(...)
+      - pattern: gets(...)
+      - pattern: fgets(...)
+    pattern-sinks:
+      - pattern: system(...)
+      - pattern: popen(...)
+      - pattern: execl(...)
+      - pattern: execlp(...)
+      - pattern: execv(...)
+      - pattern: execvp(...)

@@ -1,0 +1,23 @@
+{
+  "results": [
+    {
+      "check_id": "dcs.python.malformed.missing-cwe",
+      "path": "app.py",
+      "start": {"line": 10, "col": 4, "offset": 100},
+      "end": {"line": 10, "col": 20, "offset": 116},
+      "extra": {
+        "message": "This result is missing the required cwe metadata field.",
+        "severity": "WARNING",
+        "metadata": {
+          "source_category": "web_input",
+          "source_function": "request.form",
+          "sink_category": "sql_injection",
+          "sink_function": "cursor.execute"
+        },
+        "metavars": {}
+      }
+    }
+  ],
+  "errors": [],
+  "stats": {"findings": 1}
+}

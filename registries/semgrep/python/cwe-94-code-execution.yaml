@@ -1,0 +1,25 @@
+rules:
+  - id: dcs.python.cwe-94.code-execution
+    message: >
+      User input from $SOURCE flows to a dynamic code execution function.
+      Never pass user-controlled data to eval, exec, or compile. Use safe
+      alternatives such as ast.literal_eval for parsing data structures.
+    severity: ERROR
+    languages: [python]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code"
+      source_category: web_input
+      source_function: request.form
+      sink_category: code_execution
+      sink_function: eval
+      dcs_severity: critical
+    pattern-sources:
+      - pattern: request.form
+      - pattern: request.args
+      - pattern: input(...)
+    pattern-sinks:
+      - pattern: eval(...)
+      - pattern: exec(...)
+      - pattern: compile(...)

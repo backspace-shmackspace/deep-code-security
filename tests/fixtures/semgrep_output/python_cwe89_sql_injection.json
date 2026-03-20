@@ -1,0 +1,31 @@
+{
+  "results": [
+    {
+      "check_id": "dcs.python.cwe-89.sql-injection-string-concat",
+      "path": "app.py",
+      "start": {"line": 42, "col": 8, "offset": 1000},
+      "end": {"line": 42, "col": 55, "offset": 1047},
+      "extra": {
+        "message": "User input from request.form flows to SQL query.",
+        "severity": "ERROR",
+        "metadata": {
+          "cwe": ["CWE-89: SQL Injection"],
+          "source_category": "web_input",
+          "source_function": "request.form",
+          "sink_category": "sql_injection",
+          "sink_function": "cursor.execute",
+          "dcs_severity": "critical"
+        },
+        "metavars": {
+          "$SOURCE": {
+            "start": {"line": 40, "col": 12, "offset": 380},
+            "end": {"line": 40, "col": 32, "offset": 400},
+            "abstract_content": "request.form['id']"
+          }
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "stats": {"findings": 1}
+}

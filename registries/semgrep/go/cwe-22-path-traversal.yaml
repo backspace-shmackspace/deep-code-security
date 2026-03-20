@@ -1,0 +1,31 @@
+rules:
+  - id: dcs.go.cwe-22.path-traversal
+    message: >
+      User input from $SOURCE flows to a filesystem function without path
+      sanitization. An attacker can supply "../" sequences to read or write
+      files outside the intended directory. Use filepath.Base() to strip
+      directory components, or validate the resolved path is within an
+      allowed prefix.
+    severity: WARNING
+    languages: [go]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      source_category: user_input
+      source_function: r.FormValue
+      sink_category: path_traversal
+      sink_function: os.Open
+      dcs_severity: high
+    pattern-sources:
+      - pattern: r.FormValue(...)
+      - pattern: r.URL.Query()
+      - pattern: r.PostFormValue(...)
+      - pattern: r.URL.Path
+    pattern-sinks:
+      - pattern: os.Open(...)
+      - pattern: os.ReadFile(...)
+      - pattern: os.OpenFile(...)
+      - pattern: filepath.Join(...)
+    pattern-sanitizers:
+      - pattern: filepath.Base(...)

@@ -1,0 +1,31 @@
+{
+  "results": [
+    {
+      "check_id": "dcs.python.cwe-78.command-injection-os-system",
+      "path": "runner.py",
+      "start": {"line": 18, "col": 4, "offset": 320},
+      "end": {"line": 18, "col": 36, "offset": 352},
+      "extra": {
+        "message": "User input from request.args flows to os.system call.",
+        "severity": "ERROR",
+        "metadata": {
+          "cwe": ["CWE-78: OS Command Injection"],
+          "source_category": "web_input",
+          "source_function": "request.args",
+          "sink_category": "command_injection",
+          "sink_function": "os.system",
+          "dcs_severity": "critical"
+        },
+        "metavars": {
+          "$SOURCE": {
+            "start": {"line": 15, "col": 8, "offset": 220},
+            "end": {"line": 15, "col": 30, "offset": 242},
+            "abstract_content": "request.args.get('cmd')"
+          }
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "stats": {"findings": 1}
+}

@@ -437,8 +437,22 @@ def status() -> None:
     if registry_path.exists():
         registries = [f.stem for f in registry_path.glob("*.yaml") if f.is_file()]
 
+    # Determine active scanner backend
+    from deep_code_security.hunter.scanner_backend import select_backend  # noqa: PLC0415
+    try:
+        _backend = select_backend(config.scanner_backend)
+        scanner_backend_label = _backend.name
+        # Append version info if available (format: "semgrep (v1.78.0)")
+        _version = getattr(_backend, "version", None)
+        if _version:
+            _ver_str = _version if _version.startswith("v") else f"v{_version}"
+            scanner_backend_label = f"{scanner_backend_label} ({_ver_str})"
+    except RuntimeError as exc:
+        scanner_backend_label = f"unavailable ({exc})"
+
     click.echo(f"Sandbox available: {sandbox_available}")
     click.echo(f"Container runtime: {runtime}")
+    click.echo(f"Scanner backend: {scanner_backend_label}")
     click.echo(f"Registries: {', '.join(sorted(registries)) or 'none'}")
     click.echo(f"Allowed paths: {', '.join(config.allowed_paths_str)}")
 

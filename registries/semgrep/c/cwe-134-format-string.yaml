@@ -1,0 +1,35 @@
+rules:
+  - id: dcs.c.cwe-134.format-string
+    message: >
+      User input from $SOURCE flows to a format string parameter of $SINK.
+      Passing user-controlled data as the format argument (first or second
+      argument) of printf-family functions allows format string exploitation:
+      arbitrary memory reads (%x/%p) and writes (%n). Always use a literal
+      format string: printf("%s", user_input) rather than printf(user_input).
+    severity: WARNING
+    languages: [c]
+    mode: taint
+    # NOTE: Output-parameter sources (recv, fread, read, scanf, getline, getdelim)
+    # are NOT listed here per CLAUDE.md Known Limitation #7. Those functions deliver
+    # tainted data via a buffer argument, not their return value, and are not
+    # effective taint sources in the current LHS-seeding taint engine.
+    # Only return-value sources (argv, getenv, gets, fgets) are included.
+    metadata:
+      cwe:
+        - "CWE-134: Use of Externally-Controlled Format String"
+      source_category: user_input
+      source_function: argv
+      sink_category: format_string
+      sink_function: printf
+      dcs_severity: high
+    pattern-sources:
+      - pattern: argv[...]
+      - pattern: getenv(...)
+      - pattern: gets(...)
+      - pattern: fgets(...)
+    pattern-sinks:
+      - pattern: printf(...)
+      - pattern: fprintf(...)
+      - pattern: sprintf(...)
+      - pattern: snprintf(...)
+      - pattern: syslog(...)

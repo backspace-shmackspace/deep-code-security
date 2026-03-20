@@ -1,0 +1,27 @@
+rules:
+  - id: dcs.go.cwe-78.command-injection
+    message: >
+      User input from $SOURCE flows to a command execution function.
+      Unsanitized user input in exec.Command or exec.CommandContext arguments
+      enables OS command injection. Validate and allowlist all input before
+      passing it to command execution functions.
+    severity: ERROR
+    languages: [go]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      source_category: user_input
+      source_function: r.FormValue
+      sink_category: command_injection
+      sink_function: exec.Command
+      dcs_severity: critical
+    pattern-sources:
+      - pattern: r.FormValue(...)
+      - pattern: r.URL.Query()
+      - pattern: r.PostFormValue(...)
+      - pattern: r.Header.Get(...)
+      - pattern: os.Getenv(...)
+    pattern-sinks:
+      - pattern: exec.Command(...)
+      - pattern: exec.CommandContext(...)

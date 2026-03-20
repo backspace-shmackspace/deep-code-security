@@ -75,7 +75,21 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
     def __init__(self, config: Config | None = None) -> None:
         super().__init__()
         self.config = config or get_config()
-        self.hunter = HunterOrchestrator(config=self.config)
+        # HunterOrchestrator construction may raise RuntimeError if
+        # DCS_SCANNER_BACKEND=semgrep but the semgrep binary is not found.
+        # We catch this here so the server does not fail at startup -- the
+        # error is deferred to the first deep_scan_hunt call.
+        self._hunter_init_error: str | None = None
+        try:
+            self.hunter: HunterOrchestrator | None = HunterOrchestrator(config=self.config)
+        except RuntimeError as exc:
+            logger.warning(
+                "HunterOrchestrator could not be initialized: %s. "
+                "deep_scan_hunt calls will return ToolError until resolved.",
+                exc,
+            )
+            self.hunter = None
+            self._hunter_init_error = str(exc)
         self.auditor = AuditorOrchestrator(config=self.config)
         self.architect = ArchitectOrchestrator(config=self.config)
 
@@ -447,6 +461,13 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
 
     async def _handle_hunt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle deep_scan_hunt tool call."""
+        # Fail fast if the hunter could not be initialized (e.g., missing semgrep binary)
+        if self.hunter is None:
+            raise ToolError(
+                f"Scanner backend unavailable: {self._hunter_init_error}",
+                retryable=False,
+            )
+
         start = time.monotonic()
         path_raw = params.get("path", "")
 
@@ -651,6 +672,12 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
 
     async def _handle_full(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle deep_scan_full tool call."""
+        if self.hunter is None:
+            raise ToolError(
+                f"Scanner backend unavailable: {self._hunter_init_error}",
+                retryable=False,
+            )
+
         start = time.monotonic()
         path_raw = params.get("path", "")
 
@@ -796,6 +823,14 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 if f.is_file()
             ]
 
+        # Report active scanner backend (may be None if initialization failed)
+        if self.hunter is not None:
+            backend_name = getattr(self.hunter._backend, "name", "unknown")
+            backend_version = getattr(self.hunter._backend, "version", None) or ""
+        else:
+            backend_name = f"unavailable ({self._hunter_init_error})"
+            backend_version = ""
+
         return {
             "content": [
                 {
@@ -807,6 +842,8 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                         "languages_supported": sorted(registries),
                         "server_version": self.SERVER_VERSION,
                         "allowed_paths": self.config.allowed_paths_str,
+                        "scanner_backend": backend_name,
+                        "scanner_backend_version": backend_version,
                     }, ensure_ascii=False),
                 }
             ]
@@ -1078,6 +1115,11 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         synchronously, then launches fuzzing in a background thread (same pattern as
         _handle_fuzz). Returns immediately with a fuzz_run_id for polling.
         """
+        if self.hunter is None:
+            raise ToolError(
+                f"Scanner backend unavailable: {self._hunter_init_error}",
+                retryable=False,
+            )
 
         # Consent check -- must be explicitly True
         consent = params.get("consent", False)

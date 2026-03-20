@@ -1,0 +1,43 @@
+rules:
+  - id: dcs.c.cwe-190.integer-overflow
+    message: >
+      User input from $SOURCE flows to a memory allocation function ($SINK)
+      without overflow-checked arithmetic. Integer overflow in size calculations
+      passed to malloc/calloc/realloc/alloca produces undersized allocations,
+      enabling subsequent heap corruption. Validate that the computed size does
+      not exceed SIZE_MAX and that it is within expected bounds before
+      allocating.
+    severity: WARNING
+    languages: [c]
+    mode: taint
+    # NOTE: Output-parameter sources (recv, fread, read, scanf, getline, getdelim)
+    # are NOT listed here per CLAUDE.md Known Limitation #7. Those functions deliver
+    # tainted data via a buffer argument, not their return value, and are not
+    # effective taint sources in the current LHS-seeding taint engine.
+    # Only return-value sources (argv, getenv, gets, fgets) are included.
+    metadata:
+      cwe:
+        - "CWE-190: Integer Overflow or Wraparound"
+      source_category: user_input
+      source_function: argv
+      sink_category: integer_overflow
+      sink_function: malloc
+      dcs_severity: high
+    pattern-sources:
+      - pattern: argv[...]
+      - pattern: getenv(...)
+      - pattern: gets(...)
+      - pattern: fgets(...)
+    pattern-sinks:
+      - pattern: malloc(...)
+      - pattern: calloc(...)
+      - pattern: realloc(...)
+      - pattern: alloca(...)
+    pattern-sanitizers:
+      # Conditional clamp: if (n > max) n = max;
+      # Recognized by the tree-sitter conditional-assignment-sanitizer (CLAUDE.md Known Limitation #10).
+      - pattern: |
+          if ($N > $MAX) $N = $MAX;
+      # Ternary clamp: n = (n > max) ? max : n;
+      - pattern: |
+          $N = ($N > $MAX) ? $MAX : $N;

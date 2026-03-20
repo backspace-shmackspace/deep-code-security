@@ -1,0 +1,29 @@
+rules:
+  - id: dcs.go.cwe-89.sql-injection
+    message: >
+      User input from $SOURCE flows to a SQL query function.
+      String-concatenated SQL queries allow attackers to manipulate query
+      structure. Use parameterized queries (db.Query with ? placeholders)
+      instead of building SQL strings from user input.
+    severity: ERROR
+    languages: [go]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      source_category: user_input
+      source_function: r.FormValue
+      sink_category: sql_injection
+      sink_function: db.Query
+      dcs_severity: critical
+    pattern-sources:
+      - pattern: r.FormValue(...)
+      - pattern: r.URL.Query()
+      - pattern: r.PostFormValue(...)
+      - pattern: r.Header.Get(...)
+    pattern-sinks:
+      - pattern: $DB.Query(...)
+      - pattern: $DB.Exec(...)
+      - pattern: $DB.QueryRow(...)
+      - pattern: $DB.QueryContext(...)
+      - pattern: $DB.ExecContext(...)

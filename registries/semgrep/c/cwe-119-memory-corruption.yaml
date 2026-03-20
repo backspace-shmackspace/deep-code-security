@@ -1,0 +1,41 @@
+rules:
+  - id: dcs.c.cwe-119.memory-corruption
+    message: >
+      User input from $SOURCE flows to a memory operation ($SINK) without
+      verified bounds. Unsanitized size or pointer values in memcpy, memmove,
+      or strncpy can cause out-of-bounds reads or writes leading to memory
+      corruption. Validate all length arguments against buffer capacity before
+      calling memory functions.
+    severity: WARNING
+    languages: [c]
+    mode: taint
+    # NOTE: Output-parameter sources (recv, fread, read, scanf, getline, getdelim)
+    # are NOT listed here per CLAUDE.md Known Limitation #7. Those functions deliver
+    # tainted data via a buffer argument, not their return value, and are not
+    # effective taint sources in the current LHS-seeding taint engine.
+    # Only return-value sources (argv, getenv, gets, fgets) are included.
+    metadata:
+      cwe:
+        - "CWE-119: Improper Restriction of Operations within the Bounds of a Memory Buffer"
+      source_category: user_input
+      source_function: argv
+      sink_category: memory_corruption
+      sink_function: memcpy
+      dcs_severity: high
+    pattern-sources:
+      - pattern: argv[...]
+      - pattern: getenv(...)
+      - pattern: gets(...)
+      - pattern: fgets(...)
+    pattern-sinks:
+      - pattern: memcpy(...)
+      - pattern: memmove(...)
+      - pattern: strncpy(...)
+    pattern-sanitizers:
+      # Conditional clamp: if (n > max) n = max;
+      # Recognized by the tree-sitter conditional-assignment-sanitizer (CLAUDE.md Known Limitation #10).
+      - pattern: |
+          if ($N > $MAX) $N = $MAX;
+      # Ternary clamp: n = (n > max) ? max : n;
+      - pattern: |
+          $N = ($N > $MAX) ? $MAX : $N;

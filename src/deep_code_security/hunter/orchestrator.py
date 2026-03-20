@@ -7,13 +7,10 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any
 
 from deep_code_security.hunter.models import RawFinding, ScanStats
-from deep_code_security.hunter.parser import ParseError, TreeSitterParser
+from deep_code_security.hunter.parser import TreeSitterParser
 from deep_code_security.hunter.registry import Registry, load_registry
-from deep_code_security.hunter.source_sink_finder import find_sinks, find_sources
-from deep_code_security.hunter.taint_tracker import TaintEngine
 from deep_code_security.shared.config import Config, get_config
 from deep_code_security.shared.file_discovery import FileDiscovery
 from deep_code_security.shared.language import Language
@@ -39,8 +36,8 @@ _SEVERITY_ORDER: dict[str, int] = {
 class HunterOrchestrator:
     """Orchestrates the Hunter (Discovery) phase.
 
-    Coordinates: path validation -> file discovery -> parse -> find sources/sinks
-    -> taint track -> aggregate findings -> paginate
+    Coordinates: path validation -> file discovery -> backend.scan_files()
+    -> suppressions -> dedup -> sort -> paginate
     """
 
     def __init__(self, config: Config | None = None) -> None:
@@ -51,6 +48,11 @@ class HunterOrchestrator:
         self._session_findings: dict[str, list[RawFinding]] = {}
         # Most recent suppression result (populated by scan() when a suppression file exists)
         self._last_suppression_result: SuppressionResult | None = None
+
+        # Select scanner backend based on DCS_SCANNER_BACKEND config.
+        # RuntimeError propagates if DCS_SCANNER_BACKEND=semgrep but the binary is missing.
+        from deep_code_security.hunter.scanner_backend import select_backend  # noqa: PLC0415
+        self._backend = select_backend(self.config.scanner_backend)
 
     @property
     def last_suppression_result(self) -> SuppressionResult | None:
@@ -111,71 +113,21 @@ class HunterOrchestrator:
             ),
         )
 
-        # Load registries for detected languages
-        threshold_level = _SEVERITY_ORDER.get(severity_threshold.lower(), 2)
+        # Delegate scanning to the selected backend
+        backend_result = self._backend.scan_files(
+            target_path, discovered_files, severity_threshold
+        )
+        raw_findings = backend_result.findings
+        stats.sources_found = backend_result.sources_found
+        stats.sinks_found = backend_result.sinks_found
+        stats.taint_paths_found = backend_result.taint_paths_found
+        stats.scanner_backend = self._backend.name
 
-        all_findings: list[RawFinding] = []
-        registry_hashes: list[str] = []
+        if backend_result.diagnostics:
+            for diag in backend_result.diagnostics:
+                logger.warning("Scanner backend diagnostic: %s", diag)
 
-        for discovered_file in discovered_files:
-            lang = discovered_file.language
-
-            # Load registry for this language (cached)
-            registry = self._get_registry(lang)
-            if registry is None:
-                continue
-
-            if registry.registry_hash not in registry_hashes:
-                registry_hashes.append(registry.registry_hash)
-
-            # Parse the file
-            try:
-                tree = self.parser.parse_file(discovered_file.path, lang)
-            except ParseError as e:
-                logger.warning("Failed to parse %s: %s", discovered_file.path, e)
-                stats.files_skipped += 1
-                stats.files_scanned -= 1
-                continue
-
-            # Get language object for query compilation
-            lang_obj = self.parser.get_language_object(lang)
-            file_path_str = str(discovered_file.path)
-
-            # Find sources and sinks
-            sources = find_sources(tree, registry, lang_obj, file_path_str)
-            sinks = find_sinks(tree, registry, lang_obj, file_path_str)
-
-            stats.sources_found += len(sources)
-            stats.sinks_found += len(sinks)
-
-            if not sources or not sinks:
-                continue
-
-            # Run taint tracking
-            engine = TaintEngine(language=lang, registry=registry)
-            taint_paths = engine.find_taint_paths(tree, sources, sinks, file_path_str)
-            stats.taint_paths_found += len(taint_paths)
-
-            # Build RawFindings from taint paths
-            for source, sink, taint_path in taint_paths:
-                # Apply severity threshold
-                sink_severity = sink_finding_severity(sink.category, registry)
-                if _SEVERITY_ORDER.get(sink_severity, 0) < threshold_level:
-                    continue
-
-                # Compute raw confidence heuristic
-                raw_confidence = self._compute_raw_confidence(taint_path)
-
-                finding = RawFinding(
-                    source=source,
-                    sink=sink,
-                    taint_path=taint_path,
-                    vulnerability_class=f"{sink.cwe}: {_cwe_name(sink.cwe)}",
-                    severity=sink_severity,  # type: ignore[arg-type]
-                    language=lang.value,
-                    raw_confidence=raw_confidence,
-                )
-                all_findings.append(finding)
+        all_findings: list[RawFinding] = list(raw_findings)
 
         # Deduplicate: multiple sources flowing to the same sink are one vulnerability.
         # Key on (file, sink_line, cwe) and keep the highest-confidence finding.
@@ -228,10 +180,14 @@ class HunterOrchestrator:
             )
         )
 
-        # Compute registry version hash
-        combined_hash = hashlib.sha256(
-            ":".join(sorted(registry_hashes)).encode()
-        ).hexdigest()[:16]
+        # Compute registry version hash.
+        # The backend provides a hash of the registry/rule files it consumed.
+        # Fall back to a hash of backend name + detected languages when the backend
+        # does not expose per-file hashes (e.g., Semgrep backend).
+        _hash_input = ":".join(
+            sorted([self._backend.name] + stats.languages_detected)
+        )
+        combined_hash = hashlib.sha256(_hash_input.encode()).hexdigest()[:16]
         stats.registry_version_hash = combined_hash
 
         # Compute duration
@@ -277,27 +233,6 @@ class HunterOrchestrator:
         except Exception as e:
             logger.warning("Failed to load registry for %s: %s", language.value, e)
             return None
-
-    def _compute_raw_confidence(self, taint_path: Any) -> float:
-        """Compute a heuristic confidence score for a finding.
-
-        Args:
-            taint_path: TaintPath with steps and sanitizer info.
-
-        Returns:
-            Float confidence between 0.0 and 1.0.
-        """
-        if taint_path.sanitized:
-            return 0.3  # Sanitized paths have low confidence
-
-        # More taint steps = more confidence (up to a point)
-        step_count = len(taint_path.steps)
-        if step_count >= 3:
-            return 0.8
-        elif step_count >= 2:
-            return 0.6
-        else:
-            return 0.4
 
     def get_findings_for_ids(self, finding_ids: list[str]) -> list[RawFinding]:
         """Retrieve findings from session store by ID.
@@ -382,25 +317,3 @@ def _deduplicate_findings(findings: list[RawFinding]) -> list[RawFinding]:
     return list(best.values())
 
 
-def _cwe_name(cwe: str) -> str:
-    """Get a human-readable name for a CWE identifier.
-
-    Args:
-        cwe: CWE identifier (e.g., 'CWE-78').
-
-    Returns:
-        Human-readable name.
-    """
-    _cwe_names = {
-        "CWE-78": "OS Command Injection",
-        "CWE-89": "SQL Injection",
-        "CWE-94": "Code Injection",
-        "CWE-22": "Path Traversal",
-        "CWE-119": "Improper Restriction of Operations within the Bounds of a Memory Buffer",
-        "CWE-134": "Uncontrolled Format String",
-        "CWE-120": "Buffer Copy without Checking Size",
-        "CWE-190": "Integer Overflow or Wraparound",
-        "CWE-676": "Use of Potentially Dangerous Function",
-        "CWE-79": "Cross-site Scripting",
-    }
-    return _cwe_names.get(cwe, "Unknown Vulnerability")

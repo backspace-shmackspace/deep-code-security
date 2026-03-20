@@ -1,5 +1,6 @@
 """Hunter phase — Discovery Agent for AST parsing and taint tracking."""
 
+from deep_code_security.hunter import scanner_backend, semgrep_backend, treesitter_backend
 from deep_code_security.hunter.models import (
     RawFinding,
     ScanStats,
@@ -18,4 +19,7 @@ __all__ = [
     "Source",
     "TaintPath",
     "TaintStep",
+    "scanner_backend",
+    "semgrep_backend",
+    "treesitter_backend",
 ]

@@ -1,0 +1,28 @@
+rules:
+  - id: dcs.python.cwe-22.path-traversal
+    message: >
+      User input from $SOURCE flows to a filesystem path function.
+      Validate and sanitize file paths using os.path.basename to strip
+      directory components, and restrict access to an allowed base directory.
+    severity: ERROR
+    languages: [python]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory"
+      source_category: web_input
+      source_function: request.form
+      sink_category: path_traversal
+      sink_function: open
+      dcs_severity: high
+    pattern-sources:
+      - pattern: request.form
+      - pattern: request.args
+      - pattern: request.view_args
+    pattern-sinks:
+      - pattern: open(...)
+      - pattern: pathlib.Path(...)
+      - pattern: os.path.join(...)
+      - pattern: shutil.copy(...)
+    pattern-sanitizers:
+      - pattern: os.path.basename(...)

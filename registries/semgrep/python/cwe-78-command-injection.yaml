@@ -1,0 +1,31 @@
+rules:
+  - id: dcs.python.cwe-78.command-injection
+    message: >
+      User input from $SOURCE flows to a shell command execution function.
+      Use subprocess with a list of arguments instead of shell=True, and never
+      pass unsanitized user input to os.system, os.popen, or subprocess functions.
+    severity: ERROR
+    languages: [python]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command"
+      source_category: web_input
+      source_function: request.form
+      sink_category: command_injection
+      sink_function: os.system
+      dcs_severity: critical
+    pattern-sources:
+      - pattern: request.form
+      - pattern: request.args
+      - pattern: os.environ.get(...)
+      - pattern: sys.argv
+      - pattern: input(...)
+    pattern-sinks:
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: subprocess.call(...)
+      - pattern: subprocess.run(...)
+      - pattern: subprocess.Popen(...)
+    pattern-sanitizers:
+      - pattern: shlex.quote(...)

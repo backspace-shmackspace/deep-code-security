@@ -1,0 +1,29 @@
+rules:
+  - id: dcs.python.cwe-89.sql-injection
+    message: >
+      User input from $SOURCE flows to a SQL query execution function.
+      Use parameterized queries with placeholders and a separate parameters tuple
+      instead of string concatenation or formatting.
+    severity: ERROR
+    languages: [python]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+      source_category: web_input
+      source_function: request.form
+      sink_category: sql_injection
+      sink_function: cursor.execute
+      dcs_severity: critical
+    pattern-sources:
+      - pattern: request.form
+      - pattern: request.args
+      - pattern: request.json
+      - pattern: request.data
+      - pattern: request.values
+    pattern-sinks:
+      - pattern: $CURSOR.execute($QUERY, ...)
+      - pattern: $CURSOR.executemany($QUERY, ...)
+      - pattern: $ENGINE.execute($QUERY, ...)
+    pattern-sanitizers:
+      - pattern: $CURSOR.execute($QUERY, ($PARAMS, ...))

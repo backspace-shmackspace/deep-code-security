@@ -53,6 +53,18 @@ class Config:
         )
         self.query_max_results: int = int(os.environ.get("DCS_QUERY_MAX_RESULTS", "1000"))
 
+        # Scanner backend selection
+        self.scanner_backend: str = os.environ.get("DCS_SCANNER_BACKEND", "auto")
+
+        # Semgrep backend configuration
+        self.semgrep_timeout: int = self._parse_semgrep_timeout(
+            os.environ.get("DCS_SEMGREP_TIMEOUT", "120")
+        )
+        self.semgrep_rules_path: Path = self._resolve_semgrep_rules_path(
+            os.environ.get("DCS_SEMGREP_RULES_PATH", ""),
+            self.registry_path,
+        )
+
         # Fuzzer configuration (DCS_FUZZ_* environment variables)
         self.fuzz_model: str = os.environ.get("DCS_FUZZ_MODEL", "claude-sonnet-4-6")
         self.fuzz_max_iterations: int = int(os.environ.get("DCS_FUZZ_MAX_ITERATIONS", "10"))
@@ -91,6 +103,120 @@ class Config:
         self.fuzz_container_image: str = os.environ.get(
             "DCS_FUZZ_CONTAINER_IMAGE", "dcs-fuzz-python:latest"
         )
+
+    # ------------------------------------------------------------------
+    # Helper methods for environment-variable parsing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_semgrep_timeout(raw: str) -> int:
+        """Parse and clamp ``DCS_SEMGREP_TIMEOUT``.
+
+        Rules:
+        - Must be a valid integer.
+        - Clamped to the range [10, 600].
+        - Invalid values fall back to the default (120) with a WARNING.
+
+        Args:
+            raw: The raw string value from the environment.
+
+        Returns:
+            Validated timeout in seconds.
+        """
+        try:
+            value = int(raw)
+        except (ValueError, TypeError):
+            logger.warning(
+                "DCS_SEMGREP_TIMEOUT=%r is not a valid integer; using default (120s).", raw
+            )
+            return 120
+        clamped = max(10, min(600, value))
+        if clamped != value:
+            logger.warning(
+                "DCS_SEMGREP_TIMEOUT=%d is outside the allowed range [10, 600]; "
+                "clamped to %d.",
+                value,
+                clamped,
+            )
+        return clamped
+
+    @staticmethod
+    def _resolve_semgrep_rules_path(raw: str, registry_path: Path) -> Path:
+        """Resolve and validate ``DCS_SEMGREP_RULES_PATH``.
+
+        Validation steps (in order):
+        1. Parse the raw string as a ``Path``.
+        2. Resolve symlinks via ``Path.resolve()``.
+        3. Reject if any component of the resolved path is ``".."``.
+        4. Fall back to the default (``registry_path / "semgrep"``) on any
+           validation failure, logging a WARNING.
+
+        A WARNING is also logged when the resolved path does not exist or does
+        not contain at least one ``.yaml`` file (useful diagnostics, but not a
+        validation failure — ``SemgrepBackend.is_available()`` performs the
+        authoritative file-presence check).
+
+        Args:
+            raw: The raw string value from the environment (empty string means
+                "use the default").
+            registry_path: The already-resolved ``DCS_REGISTRY_PATH`` used to
+                compute the default.
+
+        Returns:
+            Resolved ``Path`` for the Semgrep rules directory.
+        """
+        default = registry_path / "semgrep"
+
+        if not raw:
+            return default
+
+        try:
+            candidate = Path(raw).resolve()
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "DCS_SEMGREP_RULES_PATH=%r could not be resolved: %s; "
+                "falling back to default (%s).",
+                raw,
+                exc,
+                default,
+            )
+            return default
+
+        # Note: Path.resolve() already eliminates all ".." components and symlinks,
+        # so candidate.parts can never contain ".." at this point.
+        # The authoritative safety checks are the exists() and is_dir() guards below.
+
+        if not candidate.exists():
+            logger.warning(
+                "DCS_SEMGREP_RULES_PATH resolved to %s, which does not exist; "
+                "falling back to default (%s).",
+                candidate,
+                default,
+            )
+            return default
+
+        if not candidate.is_dir():
+            logger.warning(
+                "DCS_SEMGREP_RULES_PATH resolved to %s, which is not a directory; "
+                "falling back to default (%s).",
+                candidate,
+                default,
+            )
+            return default
+
+        # Informational warning: resolved path is not under the project root.
+        # This is legitimate (e.g., shared rules directory) but worth noting.
+        try:
+            candidate.relative_to(registry_path.parent)
+        except ValueError:
+            logger.warning(
+                "DCS_SEMGREP_RULES_PATH (%s) is not under the project root (%s). "
+                "This is allowed but unusual.",
+                candidate,
+                registry_path.parent,
+            )
+
+        return candidate
 
     @property
     def allowed_paths_str(self) -> list[str]:

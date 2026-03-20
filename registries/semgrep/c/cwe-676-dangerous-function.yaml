@@ -1,0 +1,53 @@
+rules:
+  - id: dcs.c.cwe-676.dangerous-function-gets
+    message: >
+      Call to gets() detected. gets() is unconditionally dangerous: it reads
+      an unlimited number of bytes into the destination buffer with no bounds
+      checking, guaranteeing a buffer overflow for any input longer than the
+      buffer. This function was removed from C11. Replace with fgets(buf, sizeof(buf), stdin).
+    severity: ERROR
+    languages: [c]
+    # mode: search -- pattern-match regardless of taint source; gets() is dangerous
+    # in all contexts without any source-to-sink taint path required.
+    metadata:
+      cwe:
+        - "CWE-676: Use of Potentially Dangerous Function"
+      dcs_severity: medium
+      # search-mode rules have no taint source -- there is no upstream user-controlled
+      # input to track because gets() is unconditionally dangerous.  The normalizer
+      # (_normalize_result in semgrep_backend.py) reads source_function from metadata
+      # and defaults to "unknown" when absent.  Setting it to "none" here makes the
+      # intent explicit: this finding has no meaningful source function.
+      source_function: "none"
+      source_category: "none"
+      sink_function: "gets"
+      sink_category: "dangerous_function"
+    pattern: gets(...)
+
+  - id: dcs.c.cwe-676.dangerous-function-mktemp-tmpnam
+    message: >
+      Call to mktemp() or tmpnam() detected. These functions produce predictable
+      temporary file names, enabling TOCTOU (time-of-check/time-of-use) race
+      conditions where an attacker creates the file before the program opens it.
+      Replace with mkstemp() (returns a file descriptor to a securely created
+      file) or tmpfile() (returns a FILE* with automatic cleanup).
+    severity: WARNING
+    languages: [c]
+    # mode: search -- pattern-match regardless of taint source; mktemp/tmpnam are
+    # dangerous by design due to TOCTOU races, not because of specific data flows.
+    metadata:
+      cwe:
+        - "CWE-676: Use of Potentially Dangerous Function"
+      dcs_severity: medium
+      # search-mode rules have no taint source -- mktemp/tmpnam are dangerous
+      # regardless of where their arguments originate.  The normalizer reads
+      # source_function from metadata and defaults to "unknown" when absent.
+      # Setting it to "none" here makes the intent explicit: this finding has
+      # no meaningful source function.
+      source_function: "none"
+      source_category: "none"
+      sink_function: "mktemp_or_tmpnam"
+      sink_category: "dangerous_function"
+    pattern-either:
+      - pattern: mktemp(...)
+      - pattern: tmpnam(...)

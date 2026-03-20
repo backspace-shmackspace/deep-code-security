@@ -80,6 +80,7 @@ tests/               # pytest suite (90%+ coverage required)
 | Fuzzer sandbox MCP | ContainerBackend (Podman) | SD-01 resolved; MCP runs require full container isolation |
 | Fuzzer runtime | Podman (not Docker) | Rootless Podman avoids Docker daemon socket (root-equivalent) |
 | Fuzzer eval() | Restricted + AST-validated | Justified deviation; dual-layer defense (SD-02) |
+| Scanner backend | Semgrep-primary with tree-sitter fallback | Resolves tree-sitter query brittleness; Semgrep OSS provides parity intraprocedural taint with superior pattern matching |
 
 ## CLI Commands
 
@@ -103,6 +104,9 @@ tests/               # pytest suite (90%+ coverage required)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DCS_SCANNER_BACKEND` | `auto` | Scanner backend: `semgrep`, `treesitter`, or `auto` (prefer semgrep if available) |
+| `DCS_SEMGREP_TIMEOUT` | `120` | Maximum seconds for Semgrep subprocess |
+| `DCS_SEMGREP_RULES_PATH` | `<registry>/semgrep` | Path to DCS Semgrep rule files |
 | `DCS_ALLOWED_PATHS` | cwd | Comma-separated allowlist for filesystem access |
 | `DCS_REGISTRY_PATH` | `./registries` | Path to YAML registry files |
 | `DCS_SANDBOX_TIMEOUT` | `30` | Per-exploit timeout in seconds |
@@ -145,7 +149,7 @@ Note: Podman (not Docker) is used for the fuzzer container backend. Run
 ## Known Limitations (v1)
 
 1. **Intraprocedural taint only** -- source and sink must be in the same function. Expected detection rate: 10-25% of real-world injection vulnerabilities.
-2. **Query brittleness** -- aliased imports (`req = request; req.form`), fully-qualified names (`flask.request.form`), and class attributes (`self.request.form`) are NOT matched.
+2. **Query brittleness** -- aliased imports (`req = request; req.form`), fully-qualified names (`flask.request.form`), and class attributes (`self.request.form`) are NOT matched. (Resolved when using the Semgrep backend -- Semgrep's pattern DSL handles aliased imports, fully-qualified names, and class attributes.)
 3. **PoC verification is bonus-only** -- most template PoCs fail due to missing execution context. This is expected.
 4. **No cross-language taint** -- Python calling C via FFI is not analyzed.
 5. **Fuzzer `_worker.py` uses `eval()`** -- justified deviation from CLAUDE.md eval() ban. Dual-layer AST validation (response_parser.py + _worker.py) with restricted globals provides defense in depth. See SD-02 in `plans/merge-fuzzy-wuzzy.md`.
@@ -154,6 +158,7 @@ Note: Podman (not Docker) is used for the fuzzer container backend. Run
 8. **CWE-416 (use-after-free) detection deferred** -- requires temporal ordering analysis (tracking that `free(ptr)` precedes a subsequent use of `ptr`), which is fundamentally different from the source-to-sink taint model. Deferred to a future plan.
 9. **`mktemp()`/`tmpnam()` detection gap** -- registered as CWE-676 sinks, but the taint-flow pipeline requires a source-to-sink path. Most real-world uses call these with hardcoded template strings, so they will NOT be flagged.
 10. **C conditional assignment sanitizer -- partial coverage** -- the C hunter recognizes `if (n > max) n = max;` and ternary clamp variants (`n = (n > max) ? max : n;`) as sanitizers for CWE-119/CWE-120/CWE-190, downgrading confidence from "confirmed" to "likely". Macro-based clamps (e.g., `MIN(n, max)`), early-return guards (`if (n > max) return -1;`), and bitwise masks are NOT recognized and will not reduce confidence.
+11. **Semgrep OSS taint paths are always synthetic two-step** -- Semgrep OSS does not emit `dataflow_trace` (Pro-only feature). All Semgrep findings have a synthetic two-step TaintPath (source + sink only, no intermediate variable traces), capping taint completeness score at 50. Tree-sitter findings with full paths score 100.
 
 ## File Conventions
 

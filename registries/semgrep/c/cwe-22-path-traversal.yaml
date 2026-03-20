@@ -1,0 +1,35 @@
+rules:
+  - id: dcs.c.cwe-22.path-traversal
+    message: >
+      User input from $SOURCE flows to a filesystem function ($SINK) without
+      path sanitization. An attacker can supply "../" sequences to access files
+      outside the intended directory. Resolve the path with realpath() and
+      verify the result starts with the expected base directory before opening
+      the file.
+    severity: WARNING
+    languages: [c]
+    mode: taint
+    # NOTE: Output-parameter sources (recv, fread, read, scanf, getline, getdelim)
+    # are NOT listed here per CLAUDE.md Known Limitation #7. Those functions deliver
+    # tainted data via a buffer argument, not their return value, and are not
+    # effective taint sources in the current LHS-seeding taint engine.
+    # Only return-value sources (argv, getenv, gets, fgets) are included.
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      source_category: user_input
+      source_function: argv
+      sink_category: path_traversal
+      sink_function: fopen
+      dcs_severity: high
+    pattern-sources:
+      - pattern: argv[...]
+      - pattern: getenv(...)
+      - pattern: gets(...)
+      - pattern: fgets(...)
+    pattern-sinks:
+      - pattern: fopen(...)
+      - pattern: open(...)
+      - pattern: opendir(...)
+      - pattern: access(...)
+      - pattern: stat(...)

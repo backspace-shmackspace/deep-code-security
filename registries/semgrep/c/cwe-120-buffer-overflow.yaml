@@ -1,0 +1,42 @@
+rules:
+  - id: dcs.c.cwe-120.buffer-overflow
+    message: >
+      User input from $SOURCE flows to an unbounded string or format function
+      ($SINK). Functions like strcpy, strcat, sprintf, and gets do not check
+      destination buffer capacity, enabling classic stack or heap buffer
+      overflows. Replace with bounded equivalents: strncpy/strlcpy, strncat/
+      strlcat, snprintf. Never use gets().
+    severity: ERROR
+    languages: [c]
+    mode: taint
+    # NOTE: Output-parameter sources (recv, fread, read, scanf, getline, getdelim)
+    # are NOT listed here per CLAUDE.md Known Limitation #7. Those functions deliver
+    # tainted data via a buffer argument, not their return value, and are not
+    # effective taint sources in the current LHS-seeding taint engine.
+    # Only return-value sources (argv, getenv, gets, fgets) are included.
+    metadata:
+      cwe:
+        - "CWE-120: Buffer Copy without Checking Size of Input ('Classic Buffer Overflow')"
+      source_category: user_input
+      source_function: argv
+      sink_category: buffer_overflow
+      sink_function: strcpy
+      dcs_severity: critical
+    pattern-sources:
+      - pattern: argv[...]
+      - pattern: getenv(...)
+      - pattern: gets(...)
+      - pattern: fgets(...)
+    pattern-sinks:
+      - pattern: strcpy(...)
+      - pattern: strcat(...)
+      - pattern: sprintf(...)
+      - pattern: gets(...)
+    pattern-sanitizers:
+      # Conditional clamp: if (n > max) n = max;
+      # Recognized by the tree-sitter conditional-assignment-sanitizer (CLAUDE.md Known Limitation #10).
+      - pattern: |
+          if ($N > $MAX) $N = $MAX;
+      # Ternary clamp: n = (n > max) ? max : n;
+      - pattern: |
+          $N = ($N > $MAX) ? $MAX : $N;
