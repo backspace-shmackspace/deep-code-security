@@ -95,3 +95,51 @@ class TestToJsonString:
         result = to_json_string(d)
         parsed = json.loads(result)
         assert parsed == d
+
+
+# ---------------------------------------------------------------------------
+# shared.__init__ lazy getter tests
+# ---------------------------------------------------------------------------
+
+
+class TestSharedInitGetters:
+    """Tests for lazy getter functions in shared/__init__.py."""
+
+    def test_get_formatter_returns_formatter(self) -> None:
+        """get_formatter() proxies to shared.formatters."""
+        import deep_code_security.shared as shared
+
+        formatter = shared.get_formatter("json")
+        assert formatter is not None
+
+    def test_get_supported_formats_returns_list(self) -> None:
+        """get_supported_formats() returns a non-empty list of strings."""
+        import deep_code_security.shared as shared
+
+        formats = shared.get_supported_formats()
+        assert isinstance(formats, list)
+        assert "json" in formats
+
+
+# ---------------------------------------------------------------------------
+# Language module coverage
+# ---------------------------------------------------------------------------
+
+
+class TestLanguageHelpers:
+    """Tests for is_supported() and get_supported_extensions() in shared.language."""
+
+    def test_is_supported_python_file(self) -> None:
+        from pathlib import Path
+
+        from deep_code_security.shared.language import is_supported
+
+        assert is_supported(Path("foo.py")) is True
+
+    def test_get_supported_extensions_returns_sorted_list(self) -> None:
+        from deep_code_security.shared.language import get_supported_extensions
+
+        exts = get_supported_extensions()
+        assert isinstance(exts, list)
+        assert exts == sorted(exts)
+        assert ".py" in exts

@@ -47,3 +47,34 @@ class TestDeltaTracker:
         dt.update(coverage)
         dt.reset()
         assert dt.get_total_coverage() == {}
+
+    def test_get_coverage_percent_zero_total(self) -> None:
+        """get_coverage_percent returns 0.0 when total_lines is empty."""
+        dt = DeltaTracker()
+        assert dt.get_coverage_percent({}) == 0.0
+
+    def test_get_coverage_percent_nonzero(self) -> None:
+        """get_coverage_percent computes correctly for non-zero totals."""
+        dt = DeltaTracker()
+        coverage = [
+            {
+                "files": {"foo.py": {"executed_lines": [1, 2], "missing_lines": [3]}},
+                "totals": {},
+            }
+        ]
+        dt.update(coverage)
+        pct = dt.get_coverage_percent({"foo.py": 4})
+        assert pct == 50.0
+
+    def test_get_total_coverage_returns_sets(self) -> None:
+        """get_total_coverage returns dict of sets."""
+        dt = DeltaTracker()
+        coverage = [
+            {
+                "files": {"foo.py": {"executed_lines": [1, 2], "missing_lines": []}},
+                "totals": {},
+            }
+        ]
+        dt.update(coverage)
+        total = dt.get_total_coverage()
+        assert total == {"foo.py": {1, 2}}

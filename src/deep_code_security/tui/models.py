@@ -128,6 +128,10 @@ class ScanConfig(BaseModel):
         default=False,
         description="Ignore .dcs-suppress.yaml suppression rules",
     )
+    plugin: str = Field(
+        default="python",
+        description="Fuzzer plugin for fuzz/hunt-fuzz scans ('python' or 'c')",
+    )
 
     @field_validator("scan_type", mode="before")
     @classmethod

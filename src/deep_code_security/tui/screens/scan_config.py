@@ -6,6 +6,7 @@ Presents explicitly-typed UI controls for all scan parameters:
 - ``SelectionList`` for language filter (Python, Go, C)
 - ``Select`` dropdown for severity threshold
 - ``Switch`` toggles for ``--skip-verify`` and ``--ignore-suppressions``
+- ``RadioSet`` for fuzzer plugin (Python, C) -- shown only for fuzz/hunt-fuzz
 
 There is NO free-form text input for additional CLI arguments.  Users who
 need custom flags use the ``dcs`` CLI directly.
@@ -42,6 +43,11 @@ _LANGUAGES = [
     ("Python", "python", True),
     ("Go", "go", True),
     ("C", "c", True),
+]
+
+_PLUGINS = [
+    ("python", "Python"),
+    ("c", "C"),
 ]
 
 _SEVERITY_OPTIONS: list[tuple[str, str]] = [
@@ -113,6 +119,14 @@ class ScanConfigScreen(Screen):
     #run-button {
         min-width: 20;
     }
+
+    #plugin-container {
+        margin-bottom: 1;
+    }
+
+    #plugin-radio {
+        margin-bottom: 0;
+    }
     """
 
     def __init__(
@@ -155,6 +169,12 @@ class ScanConfigScreen(Screen):
                 id="severity-select",
             )
 
+            with Vertical(id="plugin-container"):
+                yield Static("Fuzzer Plugin:", classes="section-label")
+                with RadioSet(id="plugin-radio"):
+                    for i, (plugin_id, label) in enumerate(_PLUGINS):
+                        yield RadioButton(label, id=f"plugin-{plugin_id}", value=(i == 0))
+
             yield Static("Options:", classes="section-label")
             with Horizontal(classes="switch-container", id="skip-verify-container"):
                 yield Label("Skip verification:", classes="switch-label")
@@ -187,6 +207,7 @@ class ScanConfigScreen(Screen):
         - ``--skip-verify`` is only relevant for ``full-scan``.
         - ``--ignore-suppressions`` is relevant for ``hunt``, ``full-scan``,
           and ``hunt-fuzz`` (not ``fuzz``).
+        - Plugin selector is only relevant for ``fuzz`` and ``hunt-fuzz``.
         """
         scan_type = self._get_selected_scan_type()
 
@@ -195,6 +216,9 @@ class ScanConfigScreen(Screen):
 
         ignore_supp_container = self.query_one("#ignore-supp-container")
         ignore_supp_container.display = scan_type != "fuzz"
+
+        plugin_container = self.query_one("#plugin-container")
+        plugin_container.display = scan_type in ("fuzz", "hunt-fuzz")
 
     def _get_selected_scan_type(self) -> str:
         """Return the currently selected scan type string."""
@@ -208,6 +232,14 @@ class ScanConfigScreen(Screen):
         """Return the list of selected language values."""
         selection_list = self.query_one("#language-list", SelectionList)
         return list(selection_list.selected)
+
+    def _get_selected_plugin(self) -> str:
+        """Return the currently selected fuzzer plugin string."""
+        radio_set = self.query_one("#plugin-radio", RadioSet)
+        pressed_index = radio_set.pressed_index
+        if pressed_index < 0 or pressed_index >= len(_PLUGINS):
+            return "python"
+        return _PLUGINS[pressed_index][0]
 
     def _get_severity_threshold(self) -> str:
         """Return the selected severity threshold."""
@@ -235,6 +267,10 @@ class ScanConfigScreen(Screen):
             ignore_supp_switch = self.query_one("#ignore-supp-switch", Switch)
             ignore_suppressions = ignore_supp_switch.value
 
+        plugin = "python"
+        if scan_type in ("fuzz", "hunt-fuzz"):
+            plugin = self._get_selected_plugin()
+
         config = ScanConfig(
             target_path=self._target_path,
             scan_type=scan_type,
@@ -242,6 +278,7 @@ class ScanConfigScreen(Screen):
             severity_threshold=severity,
             skip_verify=skip_verify,
             ignore_suppressions=ignore_suppressions,
+            plugin=plugin,
         )
 
         self.app.push_screen_with_kwargs(

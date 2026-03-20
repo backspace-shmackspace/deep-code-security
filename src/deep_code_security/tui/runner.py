@@ -217,6 +217,8 @@ class ScanRunner:
 
         if scan_type in ("fuzz", "hunt-fuzz"):
             cmd.append("--consent")
+            if self._config.plugin != "python":
+                cmd.extend(["--plugin", self._config.plugin])
 
         return cmd
 

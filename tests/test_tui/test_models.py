@@ -195,3 +195,39 @@ class TestScanConfig:
             scan_type="hunt",
         )
         assert not hasattr(config, "extra_args")
+
+
+# ---------------------------------------------------------------------------
+# _check_textual_available tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTextualAvailable:
+    """Tests for _check_textual_available()."""
+
+    def test_returns_true_when_textual_installed(self) -> None:
+        """Returns True when textual is importable (it is in dev environment)."""
+        from deep_code_security.tui import _check_textual_available
+
+        assert _check_textual_available() is True
+
+    def test_returns_false_when_textual_missing(self) -> None:
+        """Returns False when find_spec raises or returns None."""
+        import sys
+        from unittest.mock import patch
+
+        from deep_code_security.tui import _check_textual_available
+
+        with patch("importlib.util.find_spec", return_value=None):
+            result = _check_textual_available()
+        assert result is False
+
+    def test_returns_false_on_import_error(self) -> None:
+        """Returns False when find_spec raises ImportError."""
+        from unittest.mock import patch
+
+        from deep_code_security.tui import _check_textual_available
+
+        with patch("importlib.util.find_spec", side_effect=ImportError("no textual")):
+            result = _check_textual_available()
+        assert result is False

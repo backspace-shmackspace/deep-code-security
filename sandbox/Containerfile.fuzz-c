@@ -16,7 +16,7 @@ LABEL org.opencontainers.image.version="1.0.0"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-minimal \
     python3-pip \
-    && pip3 install --no-cache-dir "tree-sitter>=0.23.0,<0.24.0" "tree-sitter-c>=0.23.0,<0.23.5" \
+    && pip3 install --no-cache-dir --break-system-packages "tree-sitter>=0.23.0,<0.24.0" "tree-sitter-c>=0.23.0,<0.23.5" \
     && apt-get purge -y python3-pip \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*

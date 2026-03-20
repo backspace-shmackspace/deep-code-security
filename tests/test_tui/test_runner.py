@@ -765,3 +765,117 @@ class TestExtractMethods:
     def test_extract_backend_used_missing_key(self) -> None:
         """Missing key falls back to 'unknown'."""
         assert ScanRunner._extract_backend_used({}, "hunt") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Plugin flag tests (new: plugin="c" support)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCommandPlugin:
+    """Tests for --plugin flag in build_command()."""
+
+    def test_build_command_fuzz_c_plugin(self, run_dir: Path) -> None:
+        """Fuzz with plugin='c' includes --plugin c flag."""
+        config = _make_config(scan_type="fuzz", plugin="c")
+        runner = ScanRunner(config, run_dir)
+        cmd = runner.build_command()
+
+        assert "--plugin" in cmd
+        plugin_idx = cmd.index("--plugin")
+        assert cmd[plugin_idx + 1] == "c"
+
+    def test_build_command_hunt_fuzz_c_plugin(self, run_dir: Path) -> None:
+        """Hunt-fuzz with plugin='c' includes --plugin c flag."""
+        config = _make_config(scan_type="hunt-fuzz", plugin="c")
+        runner = ScanRunner(config, run_dir)
+        cmd = runner.build_command()
+
+        assert "--plugin" in cmd
+        plugin_idx = cmd.index("--plugin")
+        assert cmd[plugin_idx + 1] == "c"
+
+    def test_build_command_fuzz_python_plugin_no_flag(self, run_dir: Path) -> None:
+        """Fuzz with plugin='python' does NOT add --plugin flag."""
+        config = _make_config(scan_type="fuzz", plugin="python")
+        runner = ScanRunner(config, run_dir)
+        cmd = runner.build_command()
+
+        assert "--plugin" not in cmd
+
+    def test_build_command_hunt_no_plugin_flag(self, run_dir: Path) -> None:
+        """Hunt scans never include --plugin flag."""
+        config = _make_config(scan_type="hunt", plugin="c")
+        runner = ScanRunner(config, run_dir)
+        cmd = runner.build_command()
+
+        assert "--plugin" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# _convert_format edge case tests
+# ---------------------------------------------------------------------------
+
+
+class TestConvertFormatEdgeCases:
+    """Tests for _convert_format() branches not covered by async run tests."""
+
+    def test_convert_format_unknown_scan_type_returns_false(
+        self, run_dir: Path
+    ) -> None:
+        """Unknown scan type has no format method -- returns False."""
+        config = _make_config(scan_type="hunt")
+        runner = ScanRunner(config, run_dir)
+
+        result = runner._convert_format(
+            json_data={"total_count": 1},
+            scan_type="unknown-type",
+            fmt_name="json",
+            ext=".json",
+            prefix="unknown",
+        )
+        assert result is False
+
+    def test_convert_format_exception_returns_false(
+        self, run_dir: Path
+    ) -> None:
+        """Exception during format conversion returns False (non-fatal)."""
+        from unittest.mock import patch
+
+        config = _make_config(scan_type="hunt")
+        runner = ScanRunner(config, run_dir)
+
+        # Patch _build_result_dto to raise so the except block is exercised
+        with patch.object(
+            ScanRunner,
+            "_build_result_dto",
+            side_effect=RuntimeError("dto exploded"),
+        ):
+            result = runner._convert_format(
+                json_data={"total_count": 1},
+                scan_type="hunt",
+                fmt_name="sarif",
+                ext=".sarif",
+                prefix="hunt",
+            )
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _derive_project_name fallback test
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveProjectName:
+    """Tests for _derive_project_name() static method."""
+
+    def test_derive_project_name_normal_path(self) -> None:
+        """Derives project name from the final path component."""
+        name = ScanRunner._derive_project_name("/some/path/myproject")
+        assert name == "myproject"
+
+    def test_derive_project_name_empty_path(self) -> None:
+        """Empty-ish path returns something sensible."""
+        name = ScanRunner._derive_project_name("/")
+        # Should not raise; returns non-empty string
+        assert isinstance(name, str)

@@ -144,29 +144,6 @@ class AIEngine:
         # Circuit breaker state
         self._consecutive_failures = 0
 
-    # ------------------------------------------------------------------
-    # Read-only properties: return custom callable if set, else the
-    # module-level default.  This allows existing tests to patch the
-    # module-level function name and have it take effect, while also
-    # letting the extensibility tests assert on the resolved callable.
-    # ------------------------------------------------------------------
-
-    @property
-    def _initial_prompt_builder(self) -> Callable:
-        return self._custom_initial_prompt_builder or build_initial_prompt
-
-    @property
-    def _refinement_prompt_builder(self) -> Callable:
-        return self._custom_refinement_prompt_builder or build_refinement_prompt
-
-    @property
-    def _sast_prompt_builder(self) -> Callable:
-        return self._custom_sast_prompt_builder or build_sast_enriched_prompt
-
-    @property
-    def _response_parser_fn(self) -> Callable:
-        return self._custom_response_parser_fn or parse_ai_response
-
         # Initialize Anthropic client
         try:
             if anthropic is None:
@@ -189,6 +166,29 @@ class AIEngine:
             ) from e
         except Exception as e:
             raise AIEngineError(f"Failed to initialize Anthropic client: {e}") from e
+
+    # ------------------------------------------------------------------
+    # Read-only properties: return custom callable if set, else the
+    # module-level default.  This allows existing tests to patch the
+    # module-level function name and have it take effect, while also
+    # letting the extensibility tests assert on the resolved callable.
+    # ------------------------------------------------------------------
+
+    @property
+    def _initial_prompt_builder(self) -> Callable:
+        return self._custom_initial_prompt_builder or build_initial_prompt
+
+    @property
+    def _refinement_prompt_builder(self) -> Callable:
+        return self._custom_refinement_prompt_builder or build_refinement_prompt
+
+    @property
+    def _sast_prompt_builder(self) -> Callable:
+        return self._custom_sast_prompt_builder or build_sast_enriched_prompt
+
+    @property
+    def _response_parser_fn(self) -> Callable:
+        return self._custom_response_parser_fn or parse_ai_response
 
     def generate_initial_inputs(
         self,

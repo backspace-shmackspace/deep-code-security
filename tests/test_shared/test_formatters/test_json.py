@@ -230,3 +230,67 @@ class TestJsonFormatterHuntFuzz:
         assert parsed["correlation"]["crash_in_scope_count"] == 1
         assert len(parsed["correlation"]["entries"]) == 1
         assert parsed["correlation"]["entries"][0]["crash_in_finding_scope"] is True
+
+
+class TestJsonFormatterCoverage:
+    """Targeted tests for uncovered branches in JsonFormatter."""
+
+    def test_format_full_scan_with_suppression_summary(
+        self, sample_full_scan_result, sample_stats
+    ) -> None:
+        """format_full_scan includes suppressions when suppression_summary is set."""
+        import json as json_mod
+
+        from deep_code_security.shared.formatters.json import JsonFormatter
+        from deep_code_security.shared.formatters.protocol import SuppressionSummary
+
+        ss = SuppressionSummary(
+            suppressed_count=1,
+            total_rules=2,
+            expired_rules=0,
+            suppression_reasons={"f1": "test"},
+            suppression_file="/project/.dcs-suppress.yaml",
+        )
+        result = sample_full_scan_result.model_copy(update={"suppression_summary": ss})
+        fmt = JsonFormatter()
+        output = fmt.format_full_scan(result)
+        parsed = json_mod.loads(output)
+        assert "suppressions" in parsed
+        assert parsed["suppressions"]["suppressed_count"] == 1
+
+    def test_format_hunt_fuzz_with_fuzz_result(
+        self, sample_hunt_fuzz_result
+    ) -> None:
+        """format_hunt_fuzz includes fuzz_result when it is not None."""
+        import json as json_mod
+        from deep_code_security.shared.formatters.json import JsonFormatter
+        from deep_code_security.shared.formatters.protocol import (
+            FuzzConfigSummary,
+            FuzzReportResult,
+        )
+
+        cfg = FuzzConfigSummary(
+            model="claude-sonnet-4-6",
+            max_iterations=3,
+            inputs_per_iter=10,
+            plugin="python",
+        )
+        fuzz_res = FuzzReportResult(
+            timestamp=0.0,
+            config_summary=cfg,
+            targets=[],
+            crashes=[],
+            unique_crashes=[],
+            total_iterations=1,
+            total_inputs=5,
+            crash_count=0,
+            unique_crash_count=0,
+            timeout_count=0,
+        )
+        result = sample_hunt_fuzz_result.model_copy(
+            update={"fuzz_result": fuzz_res}
+        )
+        fmt = JsonFormatter()
+        output = fmt.format_hunt_fuzz(result)
+        parsed = json_mod.loads(output)
+        assert parsed["fuzz_result"] is not None
