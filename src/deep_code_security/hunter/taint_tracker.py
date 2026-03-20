@@ -14,6 +14,22 @@ __all__ = ["TaintEngine", "TaintState", "find_taint_paths"]
 
 logger = logging.getLogger(__name__)
 
+# Format string argument index (0-based) for printf-family functions.
+# Only the argument at this position is the format string; subsequent arguments
+# are %-substitution values and must NOT trigger a CWE-134 finding even if tainted.
+_FORMAT_STRING_ARG_INDEX: dict[str, int] = {
+    "printf": 0,
+    "vprintf": 0,
+    "fprintf": 1,
+    "vfprintf": 1,
+    "sprintf": 1,
+    "vsprintf": 1,
+    "snprintf": 2,
+    "vsnprintf": 2,
+    "syslog": 1,
+    "vsyslog": 1,
+}
+
 # Per-language AST node type mappings for taint propagation
 _LANGUAGE_NODE_TYPES: dict[str, dict[str, list[str]]] = {
     "python": {
@@ -965,6 +981,14 @@ class TaintEngine:
 
         # Fallback path: substring match for direct source patterns in args.
         # This path MUST also check conditional sanitization (F-1 fix).
+        #
+        # Skip for format_string sinks: the structured path already checked the
+        # format argument position specifically.  The substring scan would fire
+        # whenever a tainted variable appears anywhere in the call text (e.g.
+        # printf("literal %s\n", tainted_var)), which is the false positive class
+        # this check is designed to prevent.
+        if sink.category == "format_string":
+            return False, [], None
         for tainted_var in state.tainted_vars:
             node_text = sink_node.text.decode("utf-8", errors="replace") if sink_node else ""
             if tainted_var in node_text:
@@ -1011,6 +1035,13 @@ class TaintEngine:
             return None
 
         return find_at_line(root_node)
+
+    def _get_call_function_name(self, call_node: Any) -> str | None:
+        """Return the function name identifier from a call_expression node."""
+        for child in call_node.children:
+            if child.type == "identifier":
+                return child.text.decode("utf-8", errors="replace")
+        return None
 
     def _check_args_for_taint(
         self,
@@ -1072,6 +1103,18 @@ class TaintEngine:
                 result, san = is_arg_tainted(child)
                 if result:
                     return result, san
+            return None, None
+
+        if sink_category == "format_string":
+            # For format string sinks, only taint in the FORMAT argument position
+            # counts as a vulnerability.  Tainted data in subsequent %-substitution
+            # positions (e.g. printf("literal %s\n", argv[1])) is not exploitable
+            # as a format string attack and must not generate a finding.
+            fn_name = self._get_call_function_name(call_node)
+            fmt_idx = _FORMAT_STRING_ARG_INDEX.get(fn_name or "", 0)
+            named_args = [c for c in args_node.children if c.is_named]
+            if fmt_idx < len(named_args):
+                return is_arg_tainted(named_args[fmt_idx])
             return None, None
 
         return is_arg_tainted(args_node)

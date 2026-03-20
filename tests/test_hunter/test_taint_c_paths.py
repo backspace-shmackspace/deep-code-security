@@ -315,6 +315,30 @@ class TestCEndToEnd:
         sink_categories = {s.category for _, s, _ in paths}
         assert "format_string" in sink_categories
 
+    def test_format_string_literal_format_not_flagged(self, c_engine, c_parser) -> None:
+        """printf("literal %s\n", argv[1]) must NOT produce a format_string finding.
+
+        The tainted value (argv[1]) is a %-substitution argument, not the format
+        string itself.  This is the false positive class seen on OpenSSL demos.
+        """
+        code = """\
+#include <stdio.h>
+void usage(int argc, char **argv) {
+    char *input = argv[1];
+    printf("Error opening file %s\\n", input);
+}
+"""
+        tree = c_parser.parse_string(code, Language.C)
+        lang_obj = c_parser.get_language_object(Language.C)
+        registry = c_engine.registry
+        sources = find_sources(tree, registry, lang_obj, "/test.c")
+        sinks = find_sinks(tree, registry, lang_obj, "/test.c")
+        paths = c_engine.find_taint_paths(tree, sources, sinks, "/test.c")
+        format_string_paths = [p for p in paths if p[1].category == "format_string"]
+        assert len(format_string_paths) == 0, (
+            "argv in %-substitution position must not trigger CWE-134"
+        )
+
     def test_dangerous_function_gets(self, c_engine, c_parser) -> None:
         """gets() flagged as CWE-676 sink when taint flows to it."""
         fixture = VULNERABLE_C / "dangerous_functions.c"

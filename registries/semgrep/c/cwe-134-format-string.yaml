@@ -28,8 +28,22 @@ rules:
       - pattern: gets(...)
       - pattern: fgets(...)
     pattern-sinks:
-      - pattern: printf(...)
-      - pattern: fprintf(...)
-      - pattern: sprintf(...)
-      - pattern: snprintf(...)
-      - pattern: syslog(...)
+      # focus-metavariable constrains the sink to fire only when tainted data
+      # reaches the FORMAT argument specifically.  This prevents false positives
+      # like printf("literal %s\n", argv[1]) where argv is a %-argument, not
+      # the format string itself.
+      - patterns:
+          - pattern: printf($FORMAT, ...)
+          - focus-metavariable: $FORMAT
+      - patterns:
+          - pattern: fprintf($FILE, $FORMAT, ...)
+          - focus-metavariable: $FORMAT
+      - patterns:
+          - pattern: sprintf($BUF, $FORMAT, ...)
+          - focus-metavariable: $FORMAT
+      - patterns:
+          - pattern: snprintf($BUF, $N, $FORMAT, ...)
+          - focus-metavariable: $FORMAT
+      - patterns:
+          - pattern: syslog($PRIORITY, $FORMAT, ...)
+          - focus-metavariable: $FORMAT
