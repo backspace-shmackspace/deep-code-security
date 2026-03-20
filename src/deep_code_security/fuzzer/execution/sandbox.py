@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 __all__ = [
+    "CContainerBackend",
     "ContainerBackend",
     "ExecutionBackend",
     "SandboxManager",
@@ -175,17 +176,23 @@ class ContainerBackend:
             self._seccomp_profile = str(profile_path)
 
     @classmethod
-    def is_available(cls) -> bool:
-        """Return True if Podman is installed and the worker image exists.
+    def is_available(cls, image: str | None = None) -> bool:
+        """Return True if Podman is installed and the specified worker image exists.
 
         Checks both `podman version` (CLI available) and
         `podman image inspect <image>` (image built) so that the tool
         is not registered unless it's fully usable.
+
+        Args:
+            image: Container image to check. If None, checks the default
+                Python fuzzer image (``config.fuzz_container_image``).
+                Pass a specific image name to check per-plugin availability
+                (e.g., ``config.fuzz_c_container_image`` for the C plugin).
         """
         from deep_code_security.shared.config import get_config
 
         config = get_config()
-        image = config.fuzz_container_image
+        check_image = image if image is not None else config.fuzz_container_image
 
         try:
             result = subprocess.run(
@@ -201,7 +208,7 @@ class ContainerBackend:
 
         try:
             result = subprocess.run(
-                ["podman", "image", "inspect", image],
+                ["podman", "image", "inspect", check_image],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -350,6 +357,90 @@ class ContainerBackend:
             return -1, "", str(e)
 
 
+class CContainerBackend(ContainerBackend):
+    """Container backend for C fuzzer with separate IPC and build mounts.
+
+    Security policy differences from Python ContainerBackend:
+    - /workspace: rw,noexec,nosuid (IPC only -- identical to Python)
+    - /build:     tmpfs, rw,nosuid,nodev,size=128m (NO noexec -- compilation
+                  and binary execution occur here)
+    - /tmp:       rw,noexec,nosuid,size=64m (scratch -- identical to Python)
+
+    The IPC mount at /workspace retains noexec,nosuid, preserving the
+    invariant established in the approved fuzzer-container-backend plan.
+    The /build tmpfs is a SEPARATE mount dedicated to compilation artifacts
+    and binary execution. This isolates the binary execution surface from
+    the IPC channel.
+
+    The compiled binary executes on /build, which is ephemeral and destroyed
+    with the container. Even a complete container escape from the binary is
+    still bounded by the container security policy (seccomp, network=none,
+    cap-drop=ALL, no-new-privileges, read-only root).
+    """
+
+    def __init__(
+        self,
+        runtime_cmd: list[str] | None = None,
+        image: str | None = None,
+        seccomp_profile: str | None = None,
+    ) -> None:
+        from deep_code_security.shared.config import get_config
+
+        config = get_config()
+
+        # Resolve the C-specific seccomp profile path
+        if seccomp_profile is not None:
+            c_seccomp = seccomp_profile
+        else:
+            c_seccomp = str(
+                Path(__file__).resolve().parents[4] / "sandbox" / "seccomp-fuzz-c.json"
+            )
+
+        super().__init__(
+            runtime_cmd=runtime_cmd,
+            image=image or config.fuzz_c_container_image,
+            seccomp_profile=c_seccomp,
+            # Larger memory limit for compilation artifacts
+            memory_limit="1g",
+            # /tmp scratch space (noexec retained, same as Python)
+            tmpfs_size="64m",
+        )
+
+    def _build_podman_cmd(
+        self,
+        target_file: str,
+        ipc_dir: str | None,
+        timeout_seconds: float,
+        run_id: str,
+    ) -> list[str]:
+        """Build podman command with separate IPC and build mounts.
+
+        Overrides the parent to add the /build tmpfs mount (without noexec)
+        while keeping /workspace with noexec,nosuid for IPC (unchanged from
+        the parent ContainerBackend, preserving the security invariant).
+
+        The /build tmpfs is where gcc writes compiled binaries and where the
+        harness binary executes. It is separate from the /workspace IPC mount.
+        """
+        # Get the base command from parent.
+        # The parent hardcodes /workspace with noexec,nosuid -- that invariant
+        # is structural and cannot be weakened by callers.
+        podman_cmd = super()._build_podman_cmd(
+            target_file=target_file,
+            ipc_dir=ipc_dir,
+            timeout_seconds=timeout_seconds,
+            run_id=run_id,
+        )
+
+        # Insert the /build tmpfs mount (rw,nosuid,nodev -- NO noexec) just
+        # before the image name (last element). This is where gcc writes
+        # compiled binaries and where the harness binary executes.
+        # nodev prevents device node creation inside /build.
+        podman_cmd.insert(-1, "--tmpfs=/build:rw,nosuid,nodev,size=128m")
+
+        return podman_cmd
+
+
 def select_backend(require_container: bool = False) -> SubprocessBackend | ContainerBackend:
     """Return the best available execution backend.
 
@@ -391,6 +482,15 @@ class SandboxManager:
         self._backend = backend or SubprocessBackend()
         self._base_tmp_dir = base_tmp_dir
         self._active_pids: list[int] = []
+
+    def set_backend(self, backend: ExecutionBackend) -> None:
+        """Replace the active execution backend.
+
+        Args:
+            backend: An ExecutionBackend-compatible object
+                (SubprocessBackend, ContainerBackend, or CContainerBackend).
+        """
+        self._backend = backend
 
     def create_isolated_dir(self) -> str:
         """Create an isolated temporary directory for execution."""

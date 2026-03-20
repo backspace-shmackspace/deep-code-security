@@ -336,14 +336,30 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
             handler=self._handle_fuzz_status,
         )
 
-        # Register deep_scan_fuzz only when the ContainerBackend is available.
+        # Register deep_scan_fuzz if ANY fuzz container image is available.
         # This resolves SD-01: MCP-triggered fuzz runs require container isolation.
-        if ContainerBackend.is_available():
+        # Per-plugin image availability is checked at request time in _handle_fuzz.
+        # ContainerBackend.is_available() accepts an optional `image` parameter
+        # (added by Work Group 2 of the c-fuzzer-plugin plan). Fall back to the
+        # no-arg call if the updated signature is not yet available.
+        try:
+            _python_image_available = ContainerBackend.is_available(
+                image=self.config.fuzz_container_image
+            )
+            _c_image_available = ContainerBackend.is_available(
+                image=self.config.fuzz_c_container_image
+            )
+        except TypeError:
+            # Older is_available() with no parameters — check default image only.
+            _python_image_available = ContainerBackend.is_available()
+            _c_image_available = False
+        if _python_image_available or _c_image_available:
             self.register_tool(
                 name="deep_scan_fuzz",
                 description=(
-                    "Run AI-powered fuzzing against a Python target file using the "
+                    "Run AI-powered fuzzing against a target file using the "
                     "Podman container backend for safe sandboxed execution. "
+                    "Supports Python (plugin='python', default) and C (plugin='c'). "
                     "Requires explicit consent=true (source code will be sent to the "
                     "Anthropic API for input generation). Returns a fuzz_run_id that "
                     "can be polled with deep_scan_fuzz_status."
@@ -354,8 +370,18 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                         "target_path": {
                             "type": "string",
                             "description": (
-                                "Absolute path to the Python file to fuzz "
+                                "Absolute path to the target file to fuzz "
                                 "(must be in DCS_ALLOWED_PATHS)"
+                            ),
+                        },
+                        "plugin": {
+                            "type": "string",
+                            "enum": ["python", "c"],
+                            "default": "python",
+                            "description": (
+                                "Fuzzer plugin to use: 'python' (default) or 'c'. "
+                                "The 'c' plugin requires the dcs-fuzz-c:latest "
+                                "container image (run: make build-fuzz-c-sandbox)."
                             ),
                         },
                         "functions": {
@@ -383,7 +409,12 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 },
                 handler=self._handle_fuzz,
             )
-            logger.info("deep_scan_fuzz tool registered (ContainerBackend available)")
+            logger.info(
+                "deep_scan_fuzz tool registered "
+                "(python_image=%s, c_image=%s)",
+                _python_image_available,
+                _c_image_available,
+            )
 
             # Check Anthropic SDK availability for hunt-fuzz
             _anthropic_available = False
@@ -946,6 +977,14 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                 retryable=False,
             )
 
+        # Plugin selection: default "python" for backward compatibility.
+        plugin = str(params.get("plugin", "python")).lower()
+        if plugin not in ("python", "c"):
+            raise ToolError(
+                f"Invalid plugin {plugin!r}. Supported values: 'python', 'c'.",
+                retryable=False,
+            )
+
         # Validate target path
         target_path_raw = params.get("target_path", "")
         try:
@@ -994,6 +1033,8 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
         self._fuzz_runs[run_id] = run_state
 
         config = self.config
+        # Capture plugin for closure
+        _plugin = plugin
 
         # Shared mutable container so the timer callback can reach the orchestrator
         # after it is constructed inside the background thread.
@@ -1037,7 +1078,7 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
                     use_vertex=config.fuzz_use_vertex,
                     gcp_project=config.fuzz_gcp_project,
                     gcp_region=config.fuzz_gcp_region,
-                    plugin_name="python",
+                    plugin_name=_plugin,
                     verbose=False,
                 )
 
@@ -1083,7 +1124,11 @@ class DeepCodeSecurityMCPServer(BaseMCPServer):
 
         self._audit_log(
             "deep_scan_fuzz",
-            {"target": Path(target_path).name, "max_iterations": max_iterations},
+            {
+                "target": Path(target_path).name,
+                "plugin": _plugin,
+                "max_iterations": max_iterations,
+            },
             0,
             "OK",
             0,

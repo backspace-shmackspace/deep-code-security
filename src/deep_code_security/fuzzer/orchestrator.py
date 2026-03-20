@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 PLATEAU_WINDOW = 3
 
+# Compilation circuit breaker thresholds (plan Section 15).
+# If more than this fraction of inputs in an iteration have compilation
+# failures, increment the consecutive-failure counter.
+_COMPILE_FAIL_THRESHOLD = 0.80
+# After this many consecutive high-failure iterations, abort the run.
+_COMPILE_FAIL_MAX_CONSECUTIVE = 3
+
 
 class FuzzOrchestrator:
     """Orchestrates the main fuzzing loop.
@@ -54,6 +61,8 @@ class FuzzOrchestrator:
         self._partial_results: list[FuzzResult] = []
         # SAST contexts injected by BridgeOrchestrator (iteration 1 only)
         self._sast_contexts: Any | None = config.sast_contexts
+        # Compilation circuit breaker state (C plugin only, plan Section 15)
+        self._compile_fail_consecutive: int = 0
         if install_signal_handlers:
             self._setup_signal_handlers()
 
@@ -154,15 +163,40 @@ class FuzzOrchestrator:
             corpus.load_seed_corpus(config.seed_corpus_path)
 
         ai_engine = None
-        ai_engine = AIEngine(
-            model=config.model,
-            api_key=config.api_key,
-            max_cost_usd=config.max_cost_usd,
-            redact_strings=config.redact_strings,
-            use_vertex=config.use_vertex,
-            gcp_project=config.gcp_project,
-            gcp_region=config.gcp_region,
-        )
+        # C plugin: inject C-specific prompts and response parser (plan Section 13)
+        if config.plugin_name == "c":
+            from deep_code_security.fuzzer.ai.c_prompts import (
+                C_SYSTEM_PROMPT,
+                build_c_initial_prompt,
+                build_c_refinement_prompt,
+                build_c_sast_enriched_prompt,
+            )
+            from deep_code_security.fuzzer.ai.c_response_parser import parse_c_ai_response
+
+            ai_engine = AIEngine(
+                model=config.model,
+                api_key=config.api_key,
+                max_cost_usd=config.max_cost_usd,
+                redact_strings=config.redact_strings,
+                use_vertex=config.use_vertex,
+                gcp_project=config.gcp_project,
+                gcp_region=config.gcp_region,
+                system_prompt=C_SYSTEM_PROMPT,
+                initial_prompt_builder=build_c_initial_prompt,
+                refinement_prompt_builder=build_c_refinement_prompt,
+                sast_prompt_builder=build_c_sast_enriched_prompt,
+                response_parser_fn=parse_c_ai_response,
+            )
+        else:
+            ai_engine = AIEngine(
+                model=config.model,
+                api_key=config.api_key,
+                max_cost_usd=config.max_cost_usd,
+                redact_strings=config.redact_strings,
+                use_vertex=config.use_vertex,
+                gcp_project=config.gcp_project,
+                gcp_region=config.gcp_region,
+            )
 
         all_results: list[FuzzResult] = []
         current_coverage: CoverageReport | None = None
@@ -218,9 +252,15 @@ class FuzzOrchestrator:
                 iteration_results: list[FuzzResult] = []
                 coverage_data_list: list[dict] = []
 
-                # Coverage collection inside containers is deferred (plan SD-01).
-                # The container worker cannot write to host-side .coverage paths.
-                collect_coverage = not isinstance(self._backend, ContainerBackend)
+                # Coverage collection inside containers is deferred for Python
+                # (plan SD-01): the container worker cannot write to host-side
+                # .coverage paths.  For C targets, gcov data is returned via
+                # the JSON IPC protocol inside the container, so coverage is
+                # always collected regardless of backend type (plan Section 10).
+                if config.plugin_name == "c":
+                    collect_coverage = True
+                else:
+                    collect_coverage = not isinstance(self._backend, ContainerBackend)
 
                 for fuzz_input in inputs:
                     if self._shutdown_requested:
@@ -261,6 +301,51 @@ class FuzzOrchestrator:
                                 result.duration_ms,
                             )
 
+                # Compilation circuit breaker (C plugin only, plan Section 15).
+                # After each iteration check whether >80% of inputs had
+                # compilation failures.  After _COMPILE_FAIL_MAX_CONSECUTIVE
+                # consecutive such iterations, abort the run.
+                if config.plugin_name == "c" and iteration_results:
+                    compile_fails = sum(
+                        1
+                        for r in iteration_results
+                        if r.exception and r.exception.startswith("CompilationError:")
+                    )
+                    fail_rate = compile_fails / len(iteration_results)
+
+                    if fail_rate > _COMPILE_FAIL_THRESHOLD:
+                        self._compile_fail_consecutive += 1
+                        logger.warning(
+                            "Iteration %d: %.0f%% compilation failures (%d/%d). "
+                            "Consecutive high-failure iterations: %d/%d.",
+                            iteration,
+                            fail_rate * 100,
+                            compile_fails,
+                            len(iteration_results),
+                            self._compile_fail_consecutive,
+                            _COMPILE_FAIL_MAX_CONSECUTIVE,
+                        )
+                        if self._compile_fail_consecutive >= _COMPILE_FAIL_MAX_CONSECUTIVE:
+                            raise CircuitBreakerError(
+                                f"Compilation circuit breaker tripped after "
+                                f"{_COMPILE_FAIL_MAX_CONSECUTIVE} consecutive iterations "
+                                f"with >{_COMPILE_FAIL_THRESHOLD:.0%} compilation failures. "
+                                "Check that the AI is generating valid C harnesses with "
+                                "correct extern declarations and only allowed headers. "
+                                "Consider setting DCS_FUZZ_C_INCLUDE_PATHS if the target "
+                                "requires additional headers."
+                            )
+                    else:
+                        # A successful iteration resets the consecutive counter.
+                        if self._compile_fail_consecutive > 0:
+                            logger.info(
+                                "Iteration %d: compilation failure rate (%.0f%%) below "
+                                "threshold. Resetting consecutive-failure counter.",
+                                iteration,
+                                fail_rate * 100,
+                            )
+                        self._compile_fail_consecutive = 0
+
                 if coverage_data_list:
                     delta = delta_tracker.update(coverage_data_list)
                     logger.info("Coverage delta: %d new lines covered", delta.total_new_lines)
@@ -294,6 +379,9 @@ class FuzzOrchestrator:
                     logger.warning("Cost budget of $%.2f reached. Stopping.", config.max_cost_usd)
                     break
 
+        except CircuitBreakerError as e:
+            # Compilation circuit breaker (C plugin) trips here.
+            logger.error("Circuit breaker tripped: %s", e)
         except KeyboardInterrupt:
             logger.warning("Interrupted. Saving partial results...")
 
@@ -324,10 +412,20 @@ class FuzzOrchestrator:
         }
 
     def _dry_run(self, targets: list) -> FuzzReport:
-        """Show what would be sent to the API without making any calls."""
-        from deep_code_security.fuzzer.ai.prompts import build_initial_prompt
+        """Show what would be sent to the API without making any calls.
 
-        print("\n=== DRY RUN MODE ===")
+        Dispatches to the language-specific prompt builder based on
+        ``config.plugin_name`` (plan Section 13, _dry_run dispatch).
+        """
+        # Dispatch to the correct prompt builder (plan Section 13).
+        if self.config.plugin_name == "c":
+            from deep_code_security.fuzzer.ai.c_prompts import build_c_initial_prompt as _build_prompt
+            plugin_label = "C"
+        else:
+            from deep_code_security.fuzzer.ai.prompts import build_initial_prompt as _build_prompt  # type: ignore[assignment]
+            plugin_label = "Python"
+
+        print(f"\n=== DRY RUN MODE ({plugin_label} plugin) ===")
         print("The following source code would be sent to the Anthropic API:\n")
 
         for target in targets:
@@ -339,7 +437,7 @@ class FuzzOrchestrator:
             print("-" * 40)
             print()
 
-        prompt = build_initial_prompt(targets, count=5, redact_strings=self.config.redact_strings)
+        prompt = _build_prompt(targets, count=5, redact_strings=self.config.redact_strings)
         print("Sample prompt that would be sent:")
         print("=" * 40)
         print(prompt[:2000] + ("..." if len(prompt) > 2000 else ""))

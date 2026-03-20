@@ -1,0 +1,57 @@
+# Containerfile for the DCS C fuzzer worker image.
+# Provides a gcc 13 environment for compiling and executing C harnesses with
+# AddressSanitizer and gcov instrumentation. Includes tree-sitter-c for
+# Layer 2 harness validation inside the container.
+#
+# Build: podman build -t dcs-fuzz-c:latest -f sandbox/Containerfile.fuzz-c .
+
+FROM gcc:13-bookworm
+
+LABEL org.opencontainers.image.title="dcs-fuzz-c"
+LABEL org.opencontainers.image.description="Deep-code-security AI fuzzer worker: gcc 13 sandbox for compiling and executing C harnesses with ASan and gcov"
+LABEL org.opencontainers.image.version="1.0.0"
+
+# Install Python 3 and tree-sitter-c for Layer 2 harness validation inside
+# the container. pip is removed after installation to reduce attack surface.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-minimal \
+    python3-pip \
+    && pip3 install --no-cache-dir "tree-sitter>=0.23.0,<0.24.0" "tree-sitter-c>=0.23.0,<0.23.5" \
+    && apt-get purge -y python3-pip \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create package structure for the worker module
+RUN mkdir -p /app/deep_code_security/fuzzer/execution \
+             /app/deep_code_security/fuzzer/ai \
+             /app/deep_code_security/fuzzer
+
+# Copy only the C worker module
+COPY src/deep_code_security/fuzzer/execution/_c_worker.py \
+     /app/deep_code_security/fuzzer/execution/_c_worker.py
+
+# __init__.py files for package discovery
+RUN touch /app/deep_code_security/__init__.py \
+          /app/deep_code_security/fuzzer/__init__.py \
+          /app/deep_code_security/fuzzer/execution/__init__.py \
+          /app/deep_code_security/fuzzer/ai/__init__.py
+
+# Set PYTHONPATH so the module can be found
+ENV PYTHONPATH=/app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONSAFEPATH=1
+
+# /workspace is the IPC mount point (noexec,nosuid -- set by CContainerBackend)
+# /build is the compilation + execution tmpfs (nosuid,nodev -- set by CContainerBackend)
+# Both are tmpfs mounts provided at runtime; only /workspace needs to exist
+# as the WORKDIR for the entrypoint to start in.
+WORKDIR /workspace
+
+# Drop all privileges: run as nobody (uid 65534)
+USER 65534
+
+# The container expects two positional arguments passed via the run command:
+#   1. Path to input JSON file  (e.g., /workspace/input.json)
+#   2. Path to output JSON file (e.g., /workspace/output.json)
+# These are written to the /workspace tmpfs mount by CContainerBackend.
+ENTRYPOINT ["python3", "-m", "deep_code_security.fuzzer.execution._c_worker"]

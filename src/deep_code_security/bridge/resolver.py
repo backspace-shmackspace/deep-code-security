@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 
 _SEVERITY_ORDER: dict[str, int] = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
+# CWE IDs recognised by the C hunter that are relevant for fuzzing.
+_C_FUZZABLE_CWES: frozenset[str] = frozenset(
+    {
+        "CWE-119",  # Improper Restriction of Operations within Bounds
+        "CWE-120",  # Buffer Copy without Checking Size of Input
+        "CWE-134",  # Use of Externally-Controlled Format String
+        "CWE-190",  # Integer Overflow or Wraparound
+        "CWE-676",  # Use of Potentially Dangerous Function
+    }
+)
+
 
 def resolve_findings_to_targets(
     findings: list[RawFinding],
@@ -58,19 +69,44 @@ def resolve_findings_to_targets(
     # Maps (file_path, qualified_name) -> merged data
     target_map: dict[tuple[str, str], _TargetAccumulator] = {}
 
-    # Group findings by sink file for batch parsing
+    # Determine which C plugin names are permitted by the allowlist.
+    allowed_plugins_env: str = os.environ.get("DCS_FUZZ_ALLOWED_PLUGINS", "python")
+    allowed_plugins: frozenset[str] = frozenset(
+        p.strip().lower() for p in allowed_plugins_env.split(",") if p.strip()
+    )
+
+    # Group findings by sink file for batch parsing.
+    # Dispatch key: file extension determines the extractor to use.
     by_file: dict[str, list[RawFinding]] = {}
     for finding in findings:
-        # Filter: Python only
-        if finding.language.lower() != "python":
+        lang = finding.language.lower()
+        sink_file = finding.sink.file
+        sink_ext = Path(sink_file).suffix.lower()
+
+        if lang == "python" or sink_ext == ".py":
+            by_file.setdefault(sink_file, []).append(finding)
+        elif lang == "c" or sink_ext == ".c":
+            if "c" not in allowed_plugins:
+                logger.warning(
+                    "C finding skipped: 'c' not in DCS_FUZZ_ALLOWED_PLUGINS (%r). "
+                    "Set DCS_FUZZ_ALLOWED_PLUGINS=python,c to enable.",
+                    allowed_plugins_env,
+                )
+                skipped_findings += 1
+                skipped_reasons.append(
+                    f"C plugin not enabled (DCS_FUZZ_ALLOWED_PLUGINS={allowed_plugins_env!r}): "
+                    f"{sink_file}"
+                )
+            else:
+                by_file.setdefault(sink_file, []).append(finding)
+        else:
             skipped_findings += 1
             skipped_reasons.append(f"unsupported language: {finding.language}")
             continue
-        sink_file = finding.sink.file
-        by_file.setdefault(sink_file, []).append(finding)
 
     for sink_file, file_findings in by_file.items():
-        # Parse the file for function boundaries
+        # Parse the file for function boundaries.
+        # Dispatch extractor based on file extension.
         file_path = Path(sink_file)
         if not file_path.exists():
             for finding in file_findings:
@@ -80,12 +116,18 @@ def resolve_findings_to_targets(
                 )
             continue
 
+        sink_ext = file_path.suffix.lower()
+        is_c_file = sink_ext == ".c"
+
         try:
-            targets_in_file: list[TargetInfo] = extract_targets_from_file(
-                file_path,
-                allow_side_effects=True,
-                include_instance_methods=True,
-            )
+            if is_c_file:
+                targets_in_file = _extract_c_targets(file_path)
+            else:
+                targets_in_file = extract_targets_from_file(
+                    file_path,
+                    allow_side_effects=True,
+                    include_instance_methods=True,
+                )
         except SyntaxError as e:
             for finding in file_findings:
                 skipped_findings += 1
@@ -130,6 +172,7 @@ def resolve_findings_to_targets(
                     function_name=containing.qualified_name,
                     requires_instance=containing.is_instance_method,
                     parameter_count=param_count,
+                    plugin_name="c" if is_c_file else "python",
                 )
             acc = target_map[key]
             acc.add_finding(finding)
@@ -160,6 +203,25 @@ def resolve_findings_to_targets(
         total_findings=total_findings,
         not_directly_fuzzable=not_directly_fuzzable,
     )
+
+
+def _extract_c_targets(file_path: Path) -> list[TargetInfo]:
+    """Extract fuzzable C function targets using the C signature extractor.
+
+    Thin wrapper that imports lazily so the C extractor is only loaded when
+    a C file is actually encountered, keeping the Python-only path fast.
+
+    Args:
+        file_path: Absolute path to the .c file.
+
+    Returns:
+        List of TargetInfo objects for each fuzzable function.
+    """
+    from deep_code_security.fuzzer.analyzer.c_signature_extractor import (
+        extract_c_targets_from_file,
+    )
+
+    return extract_c_targets_from_file(file_path)
 
 
 def _find_containing_function(
@@ -203,11 +265,13 @@ class _TargetAccumulator:
         function_name: str,
         requires_instance: bool,
         parameter_count: int,
+        plugin_name: str = "python",
     ) -> None:
         self.file_path = file_path
         self.function_name = function_name
         self.requires_instance = requires_instance
         self.parameter_count = parameter_count
+        self.plugin_name = plugin_name
         self.finding_ids: list[str] = []
         self.cwe_ids: list[str] = []
         self.vulnerability_classes: list[str] = []

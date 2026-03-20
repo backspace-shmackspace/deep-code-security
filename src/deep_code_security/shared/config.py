@@ -103,6 +103,19 @@ class Config:
         self.fuzz_container_image: str = os.environ.get(
             "DCS_FUZZ_CONTAINER_IMAGE", "dcs-fuzz-python:latest"
         )
+        self.fuzz_c_container_image: str = os.environ.get(
+            "DCS_FUZZ_C_CONTAINER_IMAGE", "dcs-fuzz-c:latest"
+        )
+        self.fuzz_c_compile_flags: list[str] = [
+            f.strip()
+            for f in os.environ.get("DCS_FUZZ_C_COMPILE_FLAGS", "").split(",")
+            if f.strip()
+        ]
+        self.fuzz_c_include_paths: list[str] = [
+            p.strip()
+            for p in os.environ.get("DCS_FUZZ_C_INCLUDE_PATHS", "").split(",")
+            if p.strip()
+        ]
 
     # ------------------------------------------------------------------
     # Helper methods for environment-variable parsing

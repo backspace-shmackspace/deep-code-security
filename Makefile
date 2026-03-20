@@ -1,6 +1,7 @@
 .PHONY: lint test test-hunter test-auditor test-architect test-mcp test-fuzzer \
-        test-bridge test-tui test-integration sast security build build-sandboxes \
-        build-fuzz-sandbox clean check-vendor install install-dev audit-deps
+        test-c-fuzzer test-bridge test-tui test-integration sast security build \
+        build-sandboxes build-fuzz-sandbox build-fuzz-c-sandbox clean check-vendor \
+        install install-dev audit-deps
 
 PYTHON := python3
 PYTEST := pytest
@@ -65,6 +66,17 @@ test-fuzzer:
 		--cov=$(SRC)/fuzzer \
 		--cov-report=term-missing
 
+# Run C fuzzer plugin tests only
+test-c-fuzzer:
+	$(PYTEST) $(TESTS)/test_fuzzer/test_plugins/test_c_target.py \
+		$(TESTS)/test_fuzzer/test_ai/test_c_prompts.py \
+		$(TESTS)/test_fuzzer/test_ai/test_c_response_parser.py \
+		$(TESTS)/test_fuzzer/test_execution/test_c_worker_validation.py \
+		$(TESTS)/test_fuzzer/test_execution/test_c_container_backend.py \
+		$(TESTS)/test_fuzzer/test_c_harness_validation_adversarial.py \
+		$(TESTS)/test_fuzzer/test_ai/test_ai_engine_extensibility.py \
+		-v --cov=$(SRC)/fuzzer --cov-report=term-missing
+
 # Run bridge tests
 test-bridge:
 	$(PYTEST) $(TESTS)/test_bridge -v \
@@ -92,6 +104,10 @@ security: sast
 # Build the fuzzer sandbox container image (Podman)
 build-fuzz-sandbox:
 	podman build -t dcs-fuzz-python:latest -f sandbox/Containerfile.fuzz-python .
+
+# Build the C fuzzer sandbox container image (Podman)
+build-fuzz-c-sandbox:
+	podman build -t dcs-fuzz-c:latest -f sandbox/Containerfile.fuzz-c .
 
 # Build sandbox Docker images
 build-sandboxes:

@@ -5,6 +5,12 @@ Supports two backends:
 - Vertex AI: Uses Google ADC with project ID and region
 
 No --api-key CLI flag. The circuit breaker aborts after 3 consecutive failures.
+
+AIEngine is extensible: the constructor accepts optional system_prompt,
+initial_prompt_builder, refinement_prompt_builder, sast_prompt_builder, and
+response_parser_fn parameters. When provided, these override the default
+Python-specific implementations. When omitted, the existing Python behaviour
+is preserved exactly (backward compatible).
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections.abc import Callable
 from typing import Any
 
 try:
@@ -110,6 +117,11 @@ class AIEngine:
         use_vertex: bool = False,
         gcp_project: str = "",
         gcp_region: str = "us-east5",
+        system_prompt: str | None = None,
+        initial_prompt_builder: Callable | None = None,
+        refinement_prompt_builder: Callable | None = None,
+        sast_prompt_builder: Callable | None = None,
+        response_parser_fn: Callable | None = None,
     ) -> None:
         self.model = model
         self.max_cost_usd = max_cost_usd
@@ -118,8 +130,42 @@ class AIEngine:
         self.usage = APIUsage()
         self.context_manager = ContextManager(model)
 
+        # Pluggable prompt/parser overrides.  When not provided, the default
+        # Python-specific implementations are used (backward compatible).
+        # NOTE: _custom_* attributes are None when using defaults.  The
+        # methods call module-level imports directly in that case so that
+        # existing tests can still patch the module-level names.
+        self._system_prompt: str = system_prompt if system_prompt is not None else SYSTEM_PROMPT
+        self._custom_initial_prompt_builder: Callable | None = initial_prompt_builder
+        self._custom_refinement_prompt_builder: Callable | None = refinement_prompt_builder
+        self._custom_sast_prompt_builder: Callable | None = sast_prompt_builder
+        self._custom_response_parser_fn: Callable | None = response_parser_fn
+
         # Circuit breaker state
         self._consecutive_failures = 0
+
+    # ------------------------------------------------------------------
+    # Read-only properties: return custom callable if set, else the
+    # module-level default.  This allows existing tests to patch the
+    # module-level function name and have it take effect, while also
+    # letting the extensibility tests assert on the resolved callable.
+    # ------------------------------------------------------------------
+
+    @property
+    def _initial_prompt_builder(self) -> Callable:
+        return self._custom_initial_prompt_builder or build_initial_prompt
+
+    @property
+    def _refinement_prompt_builder(self) -> Callable:
+        return self._custom_refinement_prompt_builder or build_refinement_prompt
+
+    @property
+    def _sast_prompt_builder(self) -> Callable:
+        return self._custom_sast_prompt_builder or build_sast_enriched_prompt
+
+    @property
+    def _response_parser_fn(self) -> Callable:
+        return self._custom_response_parser_fn or parse_ai_response
 
         # Initialize Anthropic client
         try:
@@ -152,7 +198,9 @@ class AIEngine:
         """Generate initial batch of adversarial inputs from source analysis."""
         self._check_cost_budget()
         valid_targets = {t.qualified_name for t in targets}
-        prompt = build_initial_prompt(targets, count, redact_strings=self.redact_strings)
+        prompt = self._initial_prompt_builder(
+            targets, count, redact_strings=self.redact_strings
+        )
 
         return self._call_with_retry(prompt, valid_targets)
 
@@ -178,7 +226,7 @@ class AIEngine:
         """
         self._check_cost_budget()
         valid_targets = {t.qualified_name for t in targets}
-        prompt = build_sast_enriched_prompt(
+        prompt = self._sast_prompt_builder(
             targets, sast_contexts, count, redact_strings=self.redact_strings
         )
         return self._call_with_retry(prompt, valid_targets)
@@ -207,7 +255,7 @@ class AIEngine:
             if not r.success and r.exception
         ][-5:]
 
-        prompt = build_refinement_prompt(
+        prompt = self._refinement_prompt_builder(
             targets=targets,
             coverage_summary=coverage_summary,
             recent_crashes=recent_crashes,
@@ -274,7 +322,7 @@ class AIEngine:
             message = self._client.messages.create(
                 model=self.model,
                 max_tokens=4096,
-                system=SYSTEM_PROMPT,
+                system=self._system_prompt,
                 messages=[{"role": "user", "content": prompt}],
             )
             if hasattr(message, "usage"):
@@ -298,7 +346,7 @@ class AIEngine:
         valid_targets: set[str],
     ) -> list[FuzzInput]:
         """Parse AI response and validate all inputs."""
-        return parse_ai_response(response_text, valid_targets)
+        return self._response_parser_fn(response_text, valid_targets)
 
     def _check_cost_budget(self) -> None:
         """Check if we're within the cost budget."""

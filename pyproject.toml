@@ -64,6 +64,7 @@ dcs = "deep_code_security.cli:cli"
 
 [project.entry-points."deep_code_security.fuzzer_plugins"]
 python = "deep_code_security.fuzzer.plugins.python_target:PythonTargetPlugin"
+c = "deep_code_security.fuzzer.plugins.c_target:CTargetPlugin"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -73,6 +74,7 @@ deep_code_security = [
     "hunter/queries/*.scm",
     "auditor/seccomp-profile.json",
     "fuzzer/execution/_worker.py",
+    "fuzzer/execution/_c_worker.py",
 ]
 
 [tool.pytest.ini_options]
