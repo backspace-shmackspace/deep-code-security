@@ -19,7 +19,7 @@ src/deep_code_security/
     shared/          # File discovery, language detection, config, JSON output
         formatters/  # Unified formatter registry (text, json, sarif, html)
         suppressions.py  # .dcs-suppress.yaml loading and matching
-    hunter/          # Phase 1: tree-sitter parse -> taint track -> RawFinding[]
+    hunter/          # Phase 1: scanner backend (Semgrep/tree-sitter) -> taint track -> RawFinding[]
     auditor/         # Phase 2: exploit generation -> sandbox exec -> VerifiedFinding[]
     architect/       # Phase 3: context gather -> guidance -> RemediationGuidance[]
     bridge/          # SAST-to-Fuzz bridge: RawFinding[] -> FuzzTarget[], CorrelationReport

@@ -1,7 +1,7 @@
 # deep-code-security
 
 Multi-language SAST tool with agentic verification and AI-powered fuzzing. Two analysis modes:
-1. **Static Analysis (SAST)** - Uses tree-sitter for deterministic AST parsing, sandbox-verified exploit PoCs, and structured remediation guidance
+1. **Static Analysis (SAST)** - Uses Semgrep with tree-sitter fallback for deterministic AST parsing, sandbox-verified exploit PoCs, and structured remediation guidance
 2. **Dynamic Analysis (Fuzzing)** - AI-powered fuzzer with coverage-guided feedback, crash deduplication, and corpus management
 
 Exposes all functionality via an MCP server for Claude Code integration.
@@ -42,7 +42,7 @@ python -m deep_code_security.mcp
 Target Codebase
     |
     v
-HUNTER     tree-sitter parse → source/sink match → taint track
+HUNTER     scanner backend (Semgrep/tree-sitter) → source/sink match → taint track
     |      Output: RawFinding[] (JSON, paginated)
     v
 AUDITOR    PoC generation → sandbox execution → confidence scoring
@@ -153,6 +153,9 @@ For advanced tuning, additional variables are available:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DCS_SCANNER_BACKEND` | `auto` | Scanner backend: `semgrep`, `treesitter`, or `auto` (prefer semgrep if available) |
+| `DCS_SEMGREP_TIMEOUT` | `120` | Maximum seconds for Semgrep subprocess |
+| `DCS_SEMGREP_RULES_PATH` | `<registry>/semgrep` | Path to DCS Semgrep rule files |
 | `DCS_MAX_RESULTS` | `100` | Max findings returned per hunt operation |
 | `DCS_MAX_VERIFICATIONS` | `50` | Max findings to verify in auditor phase |
 | `DCS_SANDBOX_TIMEOUT` | `30` | Per-exploit timeout in seconds |
@@ -243,7 +246,7 @@ See `registries/README.md` for the YAML registry format documentation.
 
 1. **Intraprocedural taint only** — source and sink must be in the same function body. Expected detection rate: **10-25%** of real-world injection vulnerabilities. Most web app vulnerabilities span multiple function call boundaries and will NOT be detected by v1.
 
-2. **Query brittleness** — tree-sitter queries match specific AST shapes. The following patterns are NOT matched in v1:
+2. **Query brittleness (tree-sitter backend only)** — tree-sitter queries match specific AST shapes. When using Semgrep backend, aliased imports, fully-qualified names, and class attributes are handled correctly. The following patterns are NOT matched when using tree-sitter:
    - Aliased imports: `req = request; req.form`
    - Fully-qualified names: `flask.request.form`
    - Class attributes: `self.request.form`
