@@ -35,6 +35,7 @@ class PluginRegistry:
         self._plugin_classes: dict[str, type[TargetPlugin]] = {}
         self._entry_points: dict[str, importlib.metadata.EntryPoint] = {}  # deferred loading
         self._plugin_sources: dict[str, str] = {}  # name -> source package
+        self._excluded_plugins: set[str] = set()  # installed but not in allowlist
         self._loaded = False
 
     def _get_allowed_plugins(self) -> set[str]:
@@ -71,10 +72,11 @@ class PluginRegistry:
                 continue
 
             if ep.name not in allowed:
-                logger.warning(
+                logger.debug(
                     "Plugin %r not in DCS_FUZZ_ALLOWED_PLUGINS allowlist, skipping",
                     ep.name,
                 )
+                self._excluded_plugins.add(ep.name)
                 continue
 
             if legacy:
@@ -167,11 +169,18 @@ class PluginRegistry:
             except Exception:
                 continue
         available = self.list_plugins()
+        hint = ""
+        if self._excluded_plugins:
+            excluded = sorted(self._excluded_plugins)
+            current = sorted(self._get_allowed_plugins())
+            suggested = sorted(set(current) | set(excluded))
+            hint = (
+                f" Installed but excluded by DCS_FUZZ_ALLOWED_PLUGINS: {excluded}."
+                f" Try: DCS_FUZZ_ALLOWED_PLUGINS={','.join(suggested)}"
+            )
         raise PluginError(
             f"No plugin could validate target {target!r}. "
-            f"Available plugins: {available}. "
-            "Check DCS_FUZZ_ALLOWED_PLUGINS and that the target contains "
-            "source files of the expected language."
+            f"Available plugins: {available}.{hint}"
         )
 
     def list_plugins(self) -> list[str]:
@@ -195,6 +204,7 @@ class PluginRegistry:
         self._plugin_classes = {}
         self._entry_points = {}
         self._plugin_sources = {}
+        self._excluded_plugins = set()
         self._loaded = False
 
 
