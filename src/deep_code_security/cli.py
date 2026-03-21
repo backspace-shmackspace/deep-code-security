@@ -500,7 +500,7 @@ def status() -> None:
 @click.option("--gcp-region", default="us-east5", help="GCP region.")
 @click.option("--allow-side-effects", is_flag=True, help="Include functions with side effects.")
 @click.option("--verbose", is_flag=True, help="Verbose output.")
-@click.option("--plugin", default="python", help="Fuzzer plugin to use.")
+@click.option("--plugin", default=None, help="Fuzzer plugin to use (auto-detected from target if not specified).")
 @click.option("--seed-corpus", default=None, metavar="PATH", help="Seed corpus directory.")
 def fuzz(
     target: str,
@@ -536,6 +536,16 @@ def fuzz(
 
     # Validate output directory (write-path protection)
     _validate_write_path(output_dir)
+
+    # Auto-detect plugin from target when not explicitly specified.
+    if plugin is None:
+        from deep_code_security.fuzzer.plugins.registry import registry
+        from deep_code_security.fuzzer.exceptions import PluginError as _PluginError
+        try:
+            plugin = registry.auto_detect_plugin(validated_target)
+        except _PluginError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
     # Build FuzzerConfig from DCS config + CLI overrides
     from deep_code_security.fuzzer.config import FuzzerConfig

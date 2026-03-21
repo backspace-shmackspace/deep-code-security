@@ -140,6 +140,40 @@ class PluginRegistry:
         logger.info("Instantiating plugin %r from package %s", name, source)
         return self._plugin_classes[name]()
 
+    def auto_detect_plugin(self, target: str) -> str:
+        """Return the name of the first allowed plugin that accepts *target*.
+
+        Tries each plugin in sorted name order (deterministic).  Raises
+        ``PluginError`` if no allowed plugin validates the target.
+
+        Args:
+            target: Path to the fuzzing target file or directory.
+
+        Returns:
+            Plugin name string (e.g. ``"python"`` or ``"c"``).
+
+        Raises:
+            PluginError: If no loaded plugin accepts the target.
+        """
+        self._load_plugins()
+        for name in self.list_plugins():
+            try:
+                plugin = self.get_plugin(name)
+                if plugin.validate_target(target):
+                    logger.info("Auto-detected plugin %r for target %s", name, target)
+                    return name
+            except PluginError:
+                continue
+            except Exception:
+                continue
+        available = self.list_plugins()
+        raise PluginError(
+            f"No plugin could validate target {target!r}. "
+            f"Available plugins: {available}. "
+            "Check DCS_FUZZ_ALLOWED_PLUGINS and that the target contains "
+            "source files of the expected language."
+        )
+
     def list_plugins(self) -> list[str]:
         """List all available plugin names (does not instantiate).
 
