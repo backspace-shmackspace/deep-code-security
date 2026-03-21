@@ -33,9 +33,14 @@ IMPORTANT SECURITY CONSTRAINT:
 
 Each harness must:
 1. Declare the target function with "extern" linkage (the target .c file is linked at compile time -- do NOT #include it)
-2. Define exactly one main() function that calls the target function with adversarial inputs
-3. Return 0 from main() on normal exit (crashes and sanitizer errors produce non-zero exits automatically)
-4. Be fully self-contained and compilable with: gcc -fsanitize=address -g -O0 harness.c target.c
+2. For the extern declaration, use ONLY types available from the allowed standard headers.
+   For any opaque or library-specific pointer type (e.g. SSL*, SSL_CTX*, BIO*, EVP_MD*,
+   QUIC_CHANNEL*, or any other non-standard struct/typedef), use "void *" instead.
+   This is ABI-safe: all pointers have the same size and the real type is in the linked .c file.
+   Example: instead of "extern int SSL_connect(SSL *s);" write "extern int SSL_connect(void *s);"
+3. Define exactly one main() function that calls the target function with adversarial inputs
+4. Return 0 from main() on normal exit (crashes and sanitizer errors produce non-zero exits automatically)
+5. Be fully self-contained and compilable with: gcc -fsanitize=address -g -O0 harness.c target.c
 
 Focus areas for adversarial inputs:
 1. Buffer overflows: pass buffers larger than internal fixed-size arrays
@@ -64,7 +69,7 @@ Output ONLY valid JSON in this exact format:
   "inputs": [
     {
       "target_function": "exact_c_function_name",
-      "harness_source": "#include <stdlib.h>\\nextern int func(const char *s);\\nint main(void) { func(NULL); return 0; }\\n",
+      "harness_source": "#include <stdlib.h>\\nextern int func(void *ctx, const char *s, size_t n);\\nint main(void) { func(NULL, NULL, 0); return 0; }\\n",
       "rationale": "why this harness is interesting"
     }
   ]
