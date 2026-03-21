@@ -321,7 +321,7 @@ class AIEngine:
         try:
             message = self._client.messages.create(
                 model=self.model,
-                max_tokens=4096,
+                max_tokens=8192,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": prompt}],
             )

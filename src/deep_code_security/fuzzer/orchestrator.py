@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import signal
 import time
 from pathlib import Path
@@ -26,6 +27,12 @@ __all__ = ["FuzzOrchestrator"]
 logger = logging.getLogger(__name__)
 
 PLATEAU_WINDOW = 3
+
+# Maximum targets to include in a single AI prompt for the C plugin.
+# OpenSSL-scale codebases can have 1000+ functions; including all of them
+# makes the input context enormous and causes output token exhaustion.
+# Each iteration randomly samples this many targets for diversity.
+_C_MAX_TARGETS_PER_CALL = 20
 
 # Compilation circuit breaker thresholds (plan Section 15).
 # If more than this fraction of inputs in an iteration have compilation
@@ -211,16 +218,31 @@ class FuzzOrchestrator:
 
                 logger.info("=== Iteration %d/%d ===", iteration, config.max_iterations)
 
+                # For C plugin, limit targets per AI call to avoid prompt
+                # overflow and excessive cost on large codebases (e.g. OpenSSL
+                # with 1000+ functions).  Randomly sample each iteration for
+                # coverage diversity across the run.
+                if config.plugin_name == "c" and len(targets) > _C_MAX_TARGETS_PER_CALL:
+                    ai_targets = random.sample(targets, _C_MAX_TARGETS_PER_CALL)
+                    logger.debug(
+                        "C plugin: sampled %d/%d targets for AI call (iteration %d)",
+                        _C_MAX_TARGETS_PER_CALL,
+                        len(targets),
+                        iteration,
+                    )
+                else:
+                    ai_targets = targets
+
                 try:
                     if iteration == 1 and self._sast_contexts:
                         inputs = ai_engine.generate_sast_guided_inputs(
-                            targets=targets,
+                            targets=ai_targets,
                             sast_contexts=self._sast_contexts,
                             count=config.inputs_per_iteration,
                         )
                     elif iteration == 1:
                         inputs = ai_engine.generate_initial_inputs(
-                            targets=targets,
+                            targets=ai_targets,
                             count=config.inputs_per_iteration,
                         )
                     else:
@@ -229,7 +251,7 @@ class FuzzOrchestrator:
                             current_coverage, "coverage_percent", 0.0
                         )
                         inputs = ai_engine.refine_inputs(
-                            targets=targets,
+                            targets=ai_targets,
                             coverage=current_coverage,
                             previous_results=all_results[-config.inputs_per_iteration :],
                             corpus_summary=corpus_summary,
