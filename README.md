@@ -30,6 +30,15 @@ dcs report /path/to/output
 # Integrated SAST-to-Fuzz pipeline
 dcs hunt-fuzz /path/to/project
 
+# Enable C fuzzing (in addition to Python)
+export DCS_FUZZ_ALLOWED_PLUGINS=python,c
+
+# Build the C fuzzer sandbox (Podman required)
+make build-fuzz-c-sandbox
+
+# Fuzz a C target with SAST-to-Fuzz bridge
+dcs hunt-fuzz /path/to/c_project --consent
+
 # Run via MCP server
 python -m deep_code_security.mcp
 ```
@@ -321,6 +330,15 @@ Docker or Podman is used for sandbox containers that execute exploit PoCs
 exclusively for rootless container execution.
 
 All file access goes through `DCS_ALLOWED_PATHS` allowlist validation with symlink resolution. All RawFinding fields are validated before exploit template interpolation. Finding provenance is verified via server-side session store (external callers cannot inject arbitrary findings).
+
+### Fuzzer Execution Model
+
+The Python and C fuzzers use fundamentally different execution models inside the sandbox container:
+
+- **Python fuzzer** (`_worker.py`): uses `eval()` with restricted globals (no imports, limited builtins) and dual-layer AST validation. No arbitrary machine code is generated.
+- **C fuzzer** (`_c_worker.py`): does NOT use `eval()`. Instead, AI-generated C source is compiled with `gcc` and the resulting binary is executed. This means arbitrary machine code runs inside the container, making the Podman seccomp profile (`sandbox/seccomp-fuzz-c.json`) the primary security boundary.
+
+Both backends run under `--network=none`, `--read-only`, `--cap-drop=ALL`, `--pids-limit=64`, and `--memory=512m`.
 
 ## v1.1 Roadmap
 

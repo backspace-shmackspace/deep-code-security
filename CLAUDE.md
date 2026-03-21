@@ -85,6 +85,8 @@ tests/               # pytest suite (90%+ coverage required)
 | Fuzzer sandbox MCP | ContainerBackend (Podman) | SD-01 resolved; MCP runs require full container isolation |
 | Fuzzer runtime | Podman (not Docker) | Rootless Podman avoids Docker daemon socket (root-equivalent) |
 | Fuzzer eval() | Restricted + AST-validated | Justified deviation; dual-layer defense (SD-02) |
+| C fuzzer harness execution | gcc compilation + binary exec (not eval) | Avoids Python expression evaluation security risks; leverages AddressSanitizer for memory error detection |
+| C fuzzer allowlist defaults | `python` only | Opt-in model: users must explicitly set `DCS_FUZZ_ALLOWED_PLUGINS=python,c` to enable C fuzzing |
 | Scanner backend | Semgrep-primary with tree-sitter fallback | Resolves tree-sitter query brittleness; Semgrep OSS provides parity intraprocedural taint with superior pattern matching |
 
 ## CLI Commands
