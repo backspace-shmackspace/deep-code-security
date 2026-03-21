@@ -254,7 +254,8 @@ def _extract_return_type(func_def_node: Any, source_bytes: bytes) -> str:
 def _get_func_name_from_declarator(declarator_node: Any, source_bytes: bytes) -> str | None:
     """Walk a declarator node to find the function name identifier.
 
-    Handles: function_declarator, pointer_declarator wrapping function_declarator.
+    Handles: function_declarator, pointer_declarator wrapping function_declarator,
+    and parenthesized_declarator (e.g. ``void (func_name)(args)``).
     """
     if declarator_node is None:
         return None
@@ -273,7 +274,19 @@ def _get_func_name_from_declarator(declarator_node: Any, source_bytes: bytes) ->
     # Pointer: (pointer_declarator * (function_declarator ...))
     if declarator_node.type == "pointer_declarator":
         for child in declarator_node.children:
-            if child.type in ("function_declarator", "pointer_declarator"):
+            if child.type in ("function_declarator", "pointer_declarator", "parenthesized_declarator"):
+                name = _get_func_name_from_declarator(child, source_bytes)
+                if name:
+                    return name
+
+    # Parenthesized: (parenthesized_declarator "(" inner ")")
+    # Covers patterns like ``void (func_name)(args)`` and
+    # ``type (*func_ptr)(args)`` where parens wrap the declarator.
+    if declarator_node.type == "parenthesized_declarator":
+        for child in declarator_node.children:
+            if child.type == "identifier":
+                return _node_text(child, source_bytes).strip()
+            if child.type in ("function_declarator", "pointer_declarator", "parenthesized_declarator"):
                 name = _get_func_name_from_declarator(child, source_bytes)
                 if name:
                     return name
@@ -354,7 +367,7 @@ def _extract_functions_from_tree(tree: Any, source_bytes: bytes) -> list[TargetI
         # Extract function name.
         func_name = _get_func_name_from_declarator(declarator_node, source_bytes)
         if func_name is None:
-            logger.warning("Could not determine function name for node at byte %d", node.start_byte)
+            logger.debug("Could not determine function name for node at byte %d", node.start_byte)
             continue
 
         # Extract parameters.

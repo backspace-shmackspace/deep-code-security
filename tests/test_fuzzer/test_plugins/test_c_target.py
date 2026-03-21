@@ -16,6 +16,8 @@ Covers:
 
 from __future__ import annotations
 
+import logging
+import logging.handlers
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -244,6 +246,52 @@ class TestDiscoverTargets:
             targets = plugin.discover_targets(str(_BUFFER_FIXTURE))
         for target in targets:
             assert target.module_path == str(_BUFFER_FIXTURE)
+
+    def test_discover_parenthesized_declarator(self, tmp_path: Path) -> None:
+        """Functions with a parenthesized declarator (e.g. ``void (name)(args)``)
+        must be extracted without a 'Could not determine function name' warning.
+
+        This pattern appears in some codebases (e.g. OpenSSL) as a deliberate
+        style choice or as a side effect of macro expansion.
+        """
+        pytest.importorskip("tree_sitter_c", reason="tree-sitter-c required")
+        src = tmp_path / "parens.c"
+        # ``void (outer_func)(int x)`` is legal C — the name is parenthesized.
+        src.write_text(
+            "void (outer_func)(int x) { (void)x; }\n"
+            "int plain_func(int x) { return x; }\n"
+        )
+        plugin = CTargetPlugin()
+        with patch.object(CTargetPlugin, "_warn_if_apple_clang"):
+            with self._capture_warnings() as records:
+                targets = plugin.discover_targets(str(src))
+
+        names = [t.function_name for t in targets]
+        # plain_func must always be found
+        assert "plain_func" in names
+        # No WARNING-level "Could not determine function name" logs
+        warning_msgs = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert not any("Could not determine function name" in m for m in warning_msgs)
+
+    @staticmethod
+    def _capture_warnings():
+        """Context manager that captures log records from the extractor logger."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _inner():
+            logger = logging.getLogger(
+                "deep_code_security.fuzzer.analyzer.c_signature_extractor"
+            )
+            handler = logging.handlers.MemoryHandler(capacity=1000, flushLevel=100)
+            logger.addHandler(handler)
+            try:
+                yield handler.buffer
+            finally:
+                logger.removeHandler(handler)
+                handler.close()
+
+        return _inner()
 
 
 # ---------------------------------------------------------------------------
